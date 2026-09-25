@@ -1,0 +1,69 @@
+#include "TodoStore.h"
+
+#include <drogon/drogon.h>
+
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
+static void usage(const char *prog)
+{
+    std::cout << "Usage: " << prog << " [options]\n"
+              << "  -H, --host HOST     bind address (default 127.0.0.1)\n"
+              << "  -p, --port PORT     port (default 27183)\n"
+              << "  -d, --data FILE     data file (default todos.json)\n"
+              << "  -w, --web DIR       web UI directory (default " TODO_PUBLIC_DIR ")\n";
+}
+
+int main(int argc, char *argv[])
+{
+    std::string host = "127.0.0.1";
+    uint16_t port = 27183;
+    std::string dataFile = "todos.json";
+    std::string webDir = TODO_PUBLIC_DIR;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string a = argv[i];
+        auto next = [&]() -> std::string {
+            if (i + 1 >= argc)
+            {
+                std::cerr << "Missing value for " << a << "\n";
+                std::exit(2);
+            }
+            return argv[++i];
+        };
+        if (a == "-H" || a == "--host")
+            host = next();
+        else if (a == "-p" || a == "--port")
+            port = static_cast<uint16_t>(std::stoi(next()));
+        else if (a == "-d" || a == "--data")
+            dataFile = next();
+        else if (a == "-w" || a == "--web")
+            webDir = next();
+        else if (a == "-h" || a == "--help")
+            return usage(argv[0]), 0;
+        else
+            return usage(argv[0]), 2;
+    }
+
+    try
+    {
+        TodoStore::init(dataFile);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << e.what() << "\n";
+        return 1;
+    }
+
+    std::cout << "Todo server on http://" << host << ":" << port
+              << "  (data: " << dataFile << ")\n";
+
+    drogon::app()
+        .setLogLevel(trantor::Logger::kWarn)
+        .addListener(host, port)
+        .setThreadNum(2)
+        .setDocumentRoot(webDir)
+        .run();
+}

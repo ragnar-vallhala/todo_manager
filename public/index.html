@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Todos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="layout">
+    <nav id="sidebar" aria-label="Categories">
+      <ul id="nav-fixed" class="nav"></ul>
+      <ul id="nav-tree" class="nav"></ul>
+      <button id="new-category" class="quiet small">New category</button>
+    </nav>
+
+    <main>
+      <h1 class="visually-hidden">Todos</h1>
+
+      <header class="meta">
+        <button id="nav-toggle" class="quiet" aria-expanded="false" aria-controls="sidebar">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5h10M3 8h10M3 11h10"/></svg>
+          <span class="visually-hidden">Categories</span>
+        </button>
+        <div id="crumbs" class="crumbs"></div>
+        <span id="open-count" class="count-label"></span>
+        <div class="menu-wrap">
+          <button id="cat-menu-btn" class="quiet icon" aria-haspopup="menu" aria-expanded="false" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01" stroke-width="2.4"/></svg>
+            <span class="visually-hidden">Category options</span>
+          </button>
+          <div id="cat-menu" class="menu" role="menu" hidden>
+            <button role="menuitem" data-action="add-sub">New subcategory</button>
+            <button role="menuitem" data-action="rename">Rename</button>
+            <button role="menuitem" data-action="move">Move to…</button>
+            <button role="menuitem" data-action="delete" class="danger">Delete</button>
+          </div>
+        </div>
+      </header>
+
+      <form id="add-form" autocomplete="off">
+        <label for="new-title" class="visually-hidden">New todo</label>
+        <input id="new-title" type="text" placeholder="What's next?" maxlength="500">
+      </form>
+
+      <div id="open-groups"></div>
+      <p id="empty" class="empty" hidden></p>
+
+      <section id="done-section" hidden>
+        <div class="done-bar">
+          <button id="done-toggle" class="quiet" aria-expanded="false" aria-controls="done-list">
+            <svg class="chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
+            <span id="done-count"></span>
+          </button>
+          <button id="clear-done" class="quiet">Clear done</button>
+        </div>
+        <ul id="done-list" class="list" hidden></ul>
+      </section>
+
+      <p id="error" class="error" role="alert" hidden></p>
+    </main>
+  </div>
+
+  <dialog id="dialog"></dialog>
+
+  <template id="item-tpl">
+    <li class="item" draggable="true">
+      <button class="check" role="checkbox" aria-checked="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8.5l2.5 2.5L12 5.5"/></svg>
+      </button>
+      <span class="title" tabindex="0"></span>
+      <span class="tag"></span>
+      <button class="move quiet icon" aria-label="Move to category">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H8L6.5 3.5h-3a1 1 0 0 0-1 1zM7 9h4M9.5 7.5L11 9l-1.5 1.5"/></svg>
+      </button>
+      <button class="delete quiet icon" aria-label="Delete">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </li>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

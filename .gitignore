@@ -1,0 +1,7 @@
+# Build output
+build/
+
+# Runtime data created when running the server from this folder
+todos.json
+todos.json.tmp
+uploads/
