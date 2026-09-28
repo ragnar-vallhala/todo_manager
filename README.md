@@ -71,9 +71,40 @@ focused panel; `?` shows them all.
 | `d` | delete (asks) | delete (asks) |
 | `space` | toggle done | fold / unfold |
 
-Anywhere: `n` new todo, `c` jump to a category, `/` search, `[` `]` all / pending /
-done, `C` clear completed, `tab` `h`/`l` `1` `2` switch panel, `R` refresh, `q` quit.
+Anywhere: `n` new todo, `c` jump to a category, `/` search (a number also matches
+that todo id), `[` `]` all / pending / done, `H` hide / show completed, `C` clear
+completed, `T` theme, `tab` `h`/`l` `1` `2` switch panel, `R` refresh, `q` quit.
 Text fields support `ctrl-a`/`ctrl-e`/`ctrl-u`/`ctrl-k`/`ctrl-w`.
+
+### Themes
+
+`T` opens a theme picker that previews as you move; `enter` keeps it (saved to
+`~/.config/todo/theme`), `esc` goes back. `$TODO_THEME` overrides the saved choice.
+Built in: `default` (your terminal's colors), `gruvbox`, `gruvbox-light`,
+`tokyonight`, `catppuccin`, `nord`.
+
+To add your own, drop a file in `~/.config/todo/themes/NAME.theme` (a file named
+after a built-in replaces it). Roles you leave out keep the default theme's color;
+`R` in the UI re-reads the file after you edit it.
+
+```ini
+# ~/.config/todo/themes/mine.theme
+bg = #1a1b26                    # colors: #rrggbb, 0-255, a name
+fg = #c0caf5                    #   (red, bright_blue, gray, ...) or default
+border = #3b4261                # unfocused panels
+border_active = #7aa2f7         # focused panel and popups
+selection_bg = #283457          # selected row in the focused panel
+selection_bg_inactive = #292e42 # selected row in the other panel
+selection_fg = #c0caf5
+muted = #565f89                 # ids, counts, done todos (dimmed if default)
+category = #7dcfff
+pending = #e0af68
+done = #9ece6a
+accent = #bb9af7                # key hints
+search = #e0af68
+success = #9ece6a
+error = #f7768e
+```
 
 ## CLI (`todo`)
 

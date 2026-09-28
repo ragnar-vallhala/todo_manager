@@ -1,6 +1,7 @@
 // todo - command line client for the todo server.
 // With no arguments on a terminal it opens the interactive TUI.
 #include "Api.h"
+#include "Theme.h"
 #include "Tui.h"
 
 #include <unistd.h>
@@ -49,6 +50,10 @@ Categories (CAT is a path like work/robotics; case doesn't matter):
 
 Server URL, first match wins: -s/--server URL, $TODO_SERVER, the first line
 of ~/.config/todo/server, else http://127.0.0.1:27183
+
+Themes (UI only): press T in the UI to pick one; the choice is saved to
+~/.config/todo/theme ($TODO_THEME overrides it). Add your own as
+~/.config/todo/themes/NAME.theme, see the README for the format.
 )";
 }
 
@@ -57,12 +62,7 @@ std::string defaultServer()
 {
     if (const char *env = std::getenv("TODO_SERVER"); env && *env)
         return env;
-    std::string dir;
-    if (const char *xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg)
-        dir = xdg;
-    else if (const char *home = std::getenv("HOME"))
-        dir = std::string(home) + "/.config";
-    std::ifstream in(dir + "/todo/server");
+    std::ifstream in(configDir() + "/server");
     std::string line;
     if (in && std::getline(in, line))
     {

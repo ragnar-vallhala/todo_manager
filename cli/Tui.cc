@@ -1,6 +1,7 @@
 // Lazygit-style terminal UI, drawn with plain ANSI escapes (no ncurses).
 #include "Tui.h"
 #include "Api.h"
+#include "Theme.h"
 
 #include <poll.h>
 #include <signal.h>
@@ -135,17 +136,7 @@ std::vector<std::string> wrap(const std::string &s, int width)
 
 // ─────────────────────────── Drawing ────────────────────────────
 
-enum Color : int8_t
-{
-    Default = -1,
-    Red = 1,
-    Green = 2,
-    Yellow = 3,
-    Blue = 4,
-    Cyan = 6,
-    Gray = 8,
-    BrightWhite = 15,
-};
+constexpr int32_t Default = kDefaultColor;
 enum Attr : uint8_t
 {
     Bold = 1,
@@ -155,22 +146,20 @@ enum Attr : uint8_t
 
 struct Style
 {
-    int8_t fg{Default};
-    int8_t bg{Default};
+    int32_t fg{Default};  // see Theme.h for the encoding
+    int32_t bg{Default};
     uint8_t attrs{0};
 
     Style() = default;
-    Style(int fg, int bg = Default, uint8_t attrs = 0)
-        : fg(static_cast<int8_t>(fg)), bg(static_cast<int8_t>(bg)), attrs(attrs)
-    {
-    }
+    Style(int32_t fg, int32_t bg = Default, uint8_t attrs = 0) : fg(fg), bg(bg), attrs(attrs) {}
     bool operator==(const Style &o) const
     {
         return fg == o.fg && bg == o.bg && attrs == o.attrs;
     }
     bool operator!=(const Style &o) const { return !(*this == o); }
 
-    std::string sgr() const
+    // Default colors are drawn as defFg / defBg (the theme's own fg and bg).
+    std::string sgr(int32_t defFg = Default, int32_t defBg = Default) const
     {
         std::string r = "\033[0";
         if (attrs & Bold)
@@ -179,11 +168,24 @@ struct Style
             r += ";2";
         if (attrs & Strike)
             r += ";9";
-        if (fg >= 0)
-            r += ";" + std::to_string(fg < 8 ? 30 + fg : 90 + fg - 8);
-        if (bg >= 0)
-            r += ";" + std::to_string(bg < 8 ? 40 + bg : 100 + bg - 8);
+        r += color(fg == Default ? defFg : fg, 30);
+        r += color(bg == Default ? defBg : bg, 40);
         return r + "m";
+    }
+
+  private:
+    static std::string color(int32_t c, int base)
+    {
+        if (c < 0)
+            return "";
+        if (c & kRgb)
+            return ";" + std::to_string(base + 8) + ";2;" + std::to_string((c >> 16) & 0xFF) +
+                   ";" + std::to_string((c >> 8) & 0xFF) + ";" + std::to_string(c & 0xFF);
+        if (c < 8)
+            return ";" + std::to_string(base + c);
+        if (c < 16)
+            return ";" + std::to_string(base + 60 + c - 8);
+        return ";" + std::to_string(base + 8) + ";5;" + std::to_string(c);
     }
 };
 
@@ -191,6 +193,13 @@ struct Style
 class Canvas
 {
   public:
+    // Colors that Default in a Style stands for.
+    void setDefaults(int32_t fg, int32_t bg)
+    {
+        defFg_ = fg;
+        defBg_ = bg;
+    }
+
     void reset(int w, int h)
     {
         w_ = w;
@@ -264,7 +273,7 @@ class Canvas
         {
             out += "\033[" + std::to_string(y + 1) + ";1H";
             Style cur;
-            out += cur.sgr();
+            out += cur.sgr(defFg_, defBg_);
             bool prevWide = false;
             for (int x = 0; x < w_; ++x)
             {
@@ -272,7 +281,7 @@ class Canvas
                 if (c.style != cur)
                 {
                     cur = c.style;
-                    out += cur.sgr();
+                    out += cur.sgr(defFg_, defBg_);
                 }
                 // A wide glyph only survives if its right half is intact.
                 if (c.glyph.empty())
@@ -305,6 +314,7 @@ class Canvas
     Cell &at(int x, int y) { return cells_[y * w_ + x]; }
 
     int w_{0}, h_{0};
+    int32_t defFg_{Default}, defBg_{Default};
     std::vector<Cell> cells_;
 };
 
@@ -617,7 +627,7 @@ enum class Mode
     Help,
 };
 enum class Focus { Categories, Todos };
-enum class PickFor { ShowCategory, MoveTodo, MoveCategory };
+enum class PickFor { ShowCategory, MoveTodo, MoveCategory, Theme };
 
 // Pseudo-categories at the top of the categories panel.
 constexpr int64_t kAll = -1;   // every todo
@@ -637,6 +647,8 @@ const std::vector<std::pair<const char *, const char *>> kHelp = {
     {"C", "clear all completed"},
     {"/", "search (esc clears)"},
     {"[  ]", "show all / pending / done"},
+    {"H", "hide / show completed"},
+    {"T", "pick a color theme"},
     {"R", "refresh now"},
     {"q", "quit"},
 };
@@ -690,6 +702,7 @@ class App
     int run()
     {
         Terminal term;
+        setTheme(configuredTheme());
         reload();
         while (!quit_ && !term.eof())
         {
@@ -796,15 +809,25 @@ class App
     {
         std::vector<const TodoItem *> v;
         std::string q = lower(search_.text());
+        // A number (optionally "#12") also matches the todo with that id,
+        // which is listed first.
+        std::string digits = !q.empty() && q[0] == '#' ? q.substr(1) : q;
+        const bool isId = !digits.empty() && digits.size() <= 18 &&
+                          digits.find_first_not_of("0123456789") == std::string::npos;
+        const int64_t qid = isId ? std::stoll(digits) : 0;
         for (const auto &t : todos_)
         {
             if ((status_ == Status::Pending && t.done) || (status_ == Status::Done && !t.done))
                 continue;
             if (!inView(t, catSelId_))
                 continue;
-            if (!q.empty() && lower(t.title).find(q) == std::string::npos)
+            const bool idMatch = isId && t.id == qid;
+            if (!q.empty() && !idMatch && lower(t.title).find(q) == std::string::npos)
                 continue;
-            v.push_back(&t);
+            if (idMatch)
+                v.insert(v.begin(), &t);
+            else
+                v.push_back(&t);
         }
         return v;
     }
@@ -889,6 +912,51 @@ class App
         mode_ = mode;
     }
 
+    // ── theme ──
+
+    // Loads a theme by name (re-reading its file); keeps the current one on failure.
+    bool setTheme(const std::string &name)
+    {
+        std::vector<std::string> warnings;
+        auto t = loadTheme(name, warnings);
+        if (!t)
+        {
+            flash("No theme \"" + name + "\" (built-in or in " + themesDir() + ")", true);
+            return false;
+        }
+        theme_ = *t;
+        if (!warnings.empty())
+        {
+            auto more = warnings.size() - 1;
+            flash(warnings.front() + (more ? " (+" + std::to_string(more) + " more)" : ""), true);
+        }
+        return true;
+    }
+
+    // Secondary text: the theme's muted color, or dimmed text if it has none.
+    Style muted(int32_t bg = Default, uint8_t attrs = 0) const
+    {
+        return theme_.muted == Default ? Style(Default, bg, attrs | Dim)
+                                       : Style(theme_.muted, bg, attrs);
+    }
+
+    void openThemePicker()
+    {
+        themeNames_ = listThemes();
+        themeBefore_ = theme_.name;
+        pickFor_ = PickFor::Theme;
+        pickOptions_.clear();
+        pickSel_ = 0;
+        for (size_t i = 0; i < themeNames_.size(); ++i)
+        {
+            pickOptions_.push_back({static_cast<int64_t>(i), themeNames_[i], 0});
+            if (themeNames_[i] == theme_.name)
+                pickSel_ = i;
+        }
+        pickOffset_ = 0;
+        mode_ = Mode::Pick;
+    }
+
     // ── picker ──
 
     void openPicker(PickFor purpose, int64_t subject)
@@ -936,8 +1004,13 @@ class App
         auto move = [&](long d) {
             pickSel_ = static_cast<size_t>(std::clamp<long>(static_cast<long>(pickSel_) + d, 0, n - 1));
         };
+        const size_t before = pickSel_;
         if (k.type == Key::Esc || k.is("q"))
+        {
             mode_ = Mode::Normal;
+            if (pickFor_ == PickFor::Theme)
+                setTheme(themeBefore_);
+        }
         else if (k.is("j") || k.type == Key::Down)
             move(1);
         else if (k.is("k") || k.type == Key::Up)
@@ -971,8 +1044,18 @@ class App
                     collapsed_.erase(id);
                     selectCategory(subject);
                     break;
+                case PickFor::Theme:
+                    if (!saveThemeChoice(theme_.name))
+                        flash("Couldn't save theme choice to " + configDir() + "/theme", true);
+                    else if (std::getenv("TODO_THEME"))
+                        flash("Theme " + theme_.name + " saved, but $TODO_THEME overrides it", true);
+                    else
+                        flash("Theme: " + theme_.name, false);
+                    break;
             }
         }
+        if (pickFor_ == PickFor::Theme && mode_ == Mode::Pick && pickSel_ != before)
+            setTheme(themeNames_[pickSel_]);  // live preview
     }
 
     // ── input ──
@@ -1016,6 +1099,12 @@ class App
             setStatus(static_cast<int>(status_) - 1);
         else if (k.is("]"))
             setStatus(static_cast<int>(status_) + 1);
+        else if (k.is("H"))
+        {
+            const bool hide = status_ != Status::Pending;
+            setStatus(static_cast<int>(hide ? Status::Pending : Status::All));
+            flash(hide ? "Hiding completed" : "Showing completed", false);
+        }
         else if (k.is("n"))
             startInput(Mode::AddTodo, "");
         else if (k.is("c"))
@@ -1038,7 +1127,10 @@ class App
         {
             reload();
             flash("Refreshed", false);
+            setTheme(theme_.name);  // pick up edits to the theme file
         }
+        else if (k.is("T"))
+            openThemePicker();
         else if (focus_ == Focus::Categories && wide_)
             handleCategoryKeys(k);
         else
@@ -1262,7 +1354,7 @@ class App
     void panel(int x, int y, int w, int h, const std::string &title, bool active,
                const std::string &footer = "")
     {
-        Style border = active ? Style(Green, Default, Bold) : Style();
+        Style border = active ? Style(theme_.borderActive, Default, Bold) : Style(theme_.border);
         c_.box(x, y, w, h, border);
         c_.text(x + 1, y, "─" + truncate(title, w - 4) + "─", border, x + w - 1);
         if (!footer.empty() && w > 6)
@@ -1287,6 +1379,7 @@ class App
         int W, H;
         term.size(W, H);
         c_.reset(W, H);
+        c_.setDefaults(theme_.fg, theme_.bg);
         if (gResized)
         {
             gResized = 0;
@@ -1297,7 +1390,7 @@ class App
         int cx = -1, cy = -1;  // where to show the text cursor, if anywhere
         if (W < 30 || H < 8)
         {
-            c_.text(0, 0, "Terminal too small", Style(Yellow));
+            c_.text(0, 0, "Terminal too small", Style(theme_.pending));
         }
         else
         {
@@ -1348,12 +1441,13 @@ class App
     void drawStatus(int x, int y, int w, int h)
     {
         panel(x, y, w, h, "Status", false);
-        int e = c_.text(x + 2, y + 1, "● ", Style(online_ ? Green : Red));
-        c_.text(e, y + 1, online_ ? "online" : "offline", Style(online_ ? Green : Red, Default, Bold));
+        const int32_t state = online_ ? theme_.success : theme_.error;
+        int e = c_.text(x + 2, y + 1, "● ", Style(state));
+        c_.text(e, y + 1, online_ ? "online" : "offline", Style(state, Default, Bold));
         std::string host = api_.server();
         if (auto p = host.find("://"); p != std::string::npos)
             host = host.substr(p + 3);
-        c_.text(x + 2, y + 2, truncate(host, w - 4), Style(Default, Default, Dim));
+        c_.text(x + 2, y + 2, truncate(host, w - 4), muted());
     }
 
     void drawCategories(int x, int y, int w, int h)
@@ -1373,7 +1467,7 @@ class App
             const CatRow &row = rows[idx];
             const int line = y + 1 + r;
             const bool sel = idx == catSel_;
-            const int bg = sel ? (active ? Blue : Gray) : Default;
+            const int32_t bg = sel ? (active ? theme_.selectionBg : theme_.selectionBgInactive) : Default;
             if (sel)
                 c_.fill(x + 1, line, w - 2, 1, Style(Default, bg));
 
@@ -1381,14 +1475,16 @@ class App
                                            ? (collapsed_.count(row.id) ? "▸ " : "▾ ")
                                            : "  ";
             int cx = c_.text(x + 2 + 2 * row.depth, line, marker,
-                             Style(sel ? BrightWhite : Default, bg, sel ? 0 : Dim), maxX);
+                             sel ? Style(theme_.selectionFg, bg) : muted(bg), maxX);
             auto count = openCount(row.id);
             auto n = count ? std::to_string(count) : "";
             const int countX = maxX - 1 - static_cast<int>(n.size());
             const bool pseudo = row.id <= 0;
             c_.text(cx, line, truncate(row.name, countX - 1 - cx),
-                    Style(sel ? BrightWhite : pseudo ? Default : Cyan, bg, sel ? Bold : 0), maxX);
-            c_.text(countX, line, n, Style(sel ? BrightWhite : Default, bg, sel ? 0 : Dim), maxX);
+                    Style(sel ? theme_.selectionFg : pseudo ? Default : theme_.category, bg,
+                          sel ? Bold : 0),
+                    maxX);
+            c_.text(countX, line, n, sel ? Style(theme_.selectionFg, bg) : muted(bg), maxX);
         }
     }
 
@@ -1413,8 +1509,7 @@ class App
                               : search_.text().empty() ? "Nothing here — press a to add a todo"
                                                        : "Nothing matches";
             msg = truncate(msg, w - 4);
-            c_.text(x + (w - textWidth(msg)) / 2, y + 1 + rows_ / 2, msg,
-                    Style(Default, Default, Dim));
+            c_.text(x + (w - textWidth(msg)) / 2, y + 1 + rows_ / 2, msg, muted());
             return;
         }
         scrollTo(offset_, sel_, rows_, v.size());
@@ -1430,15 +1525,15 @@ class App
             const TodoItem &t = *v[idx];
             const int row = y + 1 + r;
             const bool sel = idx == sel_;
-            const int bg = sel ? (active ? Blue : Gray) : Default;
+            const int32_t bg = sel ? (active ? theme_.selectionBg : theme_.selectionBgInactive) : Default;
             if (sel)
                 c_.fill(x + 1, row, w - 2, 1, Style(Default, bg));
 
             int cx = c_.text(x + 2, row, t.done ? "[x]" : "[ ]",
-                             Style(t.done ? Green : Yellow, bg, Bold), maxX);
+                             Style(t.done ? theme_.done : theme_.pending, bg, Bold), maxX);
             auto id = std::to_string(t.id);
             cx = c_.text(cx + 1 + idWidth - static_cast<int>(id.size()), row, id,
-                         Style(sel ? BrightWhite : Default, bg, sel ? 0 : Dim), maxX);
+                         sel ? Style(theme_.selectionFg, bg) : muted(bg), maxX);
 
             // Where the todo lives, when that isn't the category being viewed.
             std::string tag;
@@ -1448,12 +1543,16 @@ class App
             tag = truncate(tag, (w - 4) / 3);
             const int tagX = maxX - 1 - textWidth(tag);
             if (!tag.empty())
-                c_.text(tagX, row, tag, Style(sel ? BrightWhite : Cyan, bg, sel ? 0 : Dim), maxX);
+                c_.text(tagX, row, tag,
+                        sel ? Style(theme_.selectionFg, bg) : Style(theme_.category, bg, Dim), maxX);
 
-            uint8_t attrs = (t.done ? Strike : 0) | (sel ? Bold : 0) | (t.done && !sel ? Dim : 0);
+            const uint8_t strike = t.done ? Strike : 0;
             const int titleEnd = tag.empty() ? maxX - 1 : tagX - 2;
             c_.text(cx + 2, row, truncate(t.title, titleEnd - (cx + 2)),
-                    Style(sel ? BrightWhite : Default, bg, attrs), maxX);
+                    sel      ? Style(theme_.selectionFg, bg, Bold | strike)
+                    : t.done ? muted(bg, strike)
+                             : Style(Default, bg),
+                    maxX);
         }
     }
 
@@ -1465,15 +1564,15 @@ class App
         const int maxX = x + w - 1;
         if (!t)
         {
-            c_.text(x + 2, y + 1, "No todo selected", Style(Default, Default, Dim), maxX);
+            c_.text(x + 2, y + 1, "No todo selected", muted(), maxX);
             return;
         }
-        const Style dim(Default, Default, Dim);
+        const Style dim = muted();
         int cx = c_.text(x + 2, y + 1, "#" + std::to_string(t->id), Style(Default, Default, Bold));
         cx = c_.text(cx, y + 1, " · ", dim);
-        cx = c_.text(cx, y + 1, t->done ? "done" : "pending", Style(t->done ? Green : Yellow));
+        cx = c_.text(cx, y + 1, t->done ? "done" : "pending", Style(t->done ? theme_.done : theme_.pending));
         cx = c_.text(cx, y + 1, " · ", dim);
-        cx = c_.text(cx, y + 1, viewName(t->categoryId), Style(Cyan), maxX);
+        cx = c_.text(cx, y + 1, viewName(t->categoryId), Style(theme_.category), maxX);
         c_.text(cx, y + 1, " · created " + formatTime(t->createdAt), dim, maxX);
 
         auto lines = wrap(t->title, inner);
@@ -1495,7 +1594,7 @@ class App
             int need = textWidth(key) + 1 + textWidth(desc) + 3;
             if (cx + need > w)
                 break;
-            cx = c_.text(cx, y, key, Style(Cyan, Default, Bold));
+            cx = c_.text(cx, y, key, Style(theme_.accent, Default, Bold));
             cx = c_.text(cx + 1, y, desc, Style()) + 3;
         }
     }
@@ -1504,14 +1603,14 @@ class App
     {
         if (mode_ == Mode::Search)
         {
-            int x = c_.text(1, y, "search: ", Style(Cyan, Default, Bold));
-            cx = search_.draw(c_, x, y, w - x - 1, Style(Yellow));
+            int x = c_.text(1, y, "search: ", Style(theme_.accent, Default, Bold));
+            cx = search_.draw(c_, x, y, w - x - 1, Style(theme_.search));
             cy = y;
             return;
         }
         if (Clock::now() < flashUntil_)
         {
-            c_.text(1, y, truncate(flash_, w - 2), Style(flashError_ ? Red : Green, Default, Bold));
+            c_.text(1, y, truncate(flash_, w - 2), Style(flashError_ ? theme_.error : theme_.success, Default, Bold));
             return;
         }
         if (focus_ == Focus::Categories)
@@ -1533,6 +1632,7 @@ class App
                       {"d", "delete"},
                       {"c", "category"},
                       {"/", "search"},
+                      {"H", "hide done"},
                       {"[ ]", "filter"},
                       {"?", "help"},
                       {"q", "quit"}});
@@ -1602,7 +1702,7 @@ class App
                             " y confirm · n cancel ");
         for (size_t i = 0; i < lines.size(); ++i)
             c_.text(x + 2, y + 1 + static_cast<int>(i), lines[i],
-                    i == 0 ? Style(Default, Default, Bold) : Style(Default, Default, Dim), x + w - 1);
+                    i == 0 ? Style(Default, Default, Bold) : muted(), x + w - 1);
     }
 
     void drawPickPopup(int W, int H)
@@ -1610,7 +1710,9 @@ class App
         const int w = std::min(W - 4, 50);
         const int h = std::min(H - 4, static_cast<int>(pickOptions_.size()) + 2);
         std::string title = "Show category";
-        if (pickFor_ == PickFor::MoveTodo)
+        if (pickFor_ == PickFor::Theme)
+            title = "Theme";
+        else if (pickFor_ == PickFor::MoveTodo)
             title = "Move #" + std::to_string(pickSubject_) + " to";
         else if (pickFor_ == PickFor::MoveCategory)
         {
@@ -1626,11 +1728,13 @@ class App
             const auto &opt = pickOptions_[idx];
             const bool sel = idx == pickSel_;
             const int line = y + 1 + r;
-            const int bg = sel ? Blue : Default;
+            const int32_t bg = sel ? theme_.selectionBg : Default;
             if (sel)
                 c_.fill(x + 1, line, w - 2, 1, Style(Default, bg));
+            const bool isCategory = pickFor_ != PickFor::Theme && opt.id > 0;
             c_.text(x + 2 + 2 * opt.depth, line, opt.label,
-                    Style(sel ? BrightWhite : opt.id > 0 ? Cyan : Default, bg, sel ? Bold : 0),
+                    Style(sel ? theme_.selectionFg : isCategory ? theme_.category : Default, bg,
+                          sel ? Bold : 0),
                     x + w - 1);
         }
     }
@@ -1643,13 +1747,16 @@ class App
         for (size_t i = 0; i < kHelp.size() && static_cast<int>(i) < H - 4; ++i)
         {
             const int row = y + 1 + static_cast<int>(i);
-            c_.text(x + 2, row, kHelp[i].first, Style(Cyan, Default, Bold));
+            c_.text(x + 2, row, kHelp[i].first, Style(theme_.accent, Default, Bold));
             c_.text(x + 18, row, kHelp[i].second, Style(), x + w - 1);
         }
     }
 
     Api &api_;
     Canvas c_;
+    Theme theme_;
+    std::vector<std::string> themeNames_;  // theme picker options
+    std::string themeBefore_;              // restored if the picker is cancelled
     std::string lastFrame_;
     bool wide_{true};
 
