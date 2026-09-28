@@ -1,7 +1,8 @@
 #pragma once
 
-// TUI color themes: a few built in, more loaded from
-// $XDG_CONFIG_HOME/todo/themes/NAME.theme (default ~/.config/todo/themes).
+// Color themes for the TUI and (served by todo_server) the web UI: a few
+// built in, more loaded from $XDG_CONFIG_HOME/todo/themes/NAME.theme
+// (default ~/.config/todo/themes).
 //
 // A theme file is "role = color" lines; '#' starts a comment (after a
 // color, leave a space before it). Roles left out keep the default theme's
@@ -42,6 +43,8 @@ struct Theme
     int32_t search{3};                        // search text
     int32_t success{2};                       // status messages, online
     int32_t error{1};                         // errors, offline
+
+    std::set<std::string> assigned;  // roles the theme sets itself
 };
 
 inline std::string configDir()
@@ -100,9 +103,12 @@ inline std::optional<int32_t> parseColor(std::string v)
     return std::nullopt;
 }
 
-inline int32_t *role(Theme &t, const std::string &key)
+using RoleList = std::vector<std::pair<const char *, int32_t Theme::*>>;
+
+// Every role, by its name in theme files.
+inline const RoleList &roles()
 {
-    const std::pair<const char *, int32_t Theme::*> roles[] = {
+    static const RoleList r = {
         {"fg", &Theme::fg},
         {"bg", &Theme::bg},
         {"border", &Theme::border},
@@ -119,7 +125,12 @@ inline int32_t *role(Theme &t, const std::string &key)
         {"success", &Theme::success},
         {"error", &Theme::error},
     };
-    for (const auto &[name, member] : roles)
+    return r;
+}
+
+inline int32_t *role(Theme &t, const std::string &key)
+{
+    for (const auto &[name, member] : roles())
         if (key == name)
             return &(t.*member);
     return nullptr;
@@ -154,7 +165,10 @@ inline void parse(Theme &t, const std::string &text, const std::string &source,
         else if (!color)
             warnings.push_back(where + ": bad color \"" + val + "\"");
         else
+        {
             *slot = *color;
+            t.assigned.insert(key);
+        }
     }
 }
 

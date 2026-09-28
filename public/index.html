@@ -9,6 +9,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="style.css">
+  <script>
+    // Apply the saved theme before first paint (app.js keeps it up to date).
+    try {
+      const vars = JSON.parse(localStorage.getItem('themeVars') || '{}');
+      for (const k in vars) document.documentElement.style.setProperty(k, vars[k]);
+    } catch {}
+  </script>
 </head>
 <body>
   <div class="layout">
@@ -16,6 +23,7 @@
       <ul id="nav-fixed" class="nav"></ul>
       <ul id="nav-tree" class="nav"></ul>
       <button id="new-category" class="quiet small">New category</button>
+      <button id="theme-btn" class="quiet small">Theme</button>
     </nav>
 
     <main>

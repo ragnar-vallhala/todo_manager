@@ -106,6 +106,13 @@ success = #9ece6a
 error = #f7768e
 ```
 
+The web UI uses the same themes: `Theme` in the sidebar (or `t`) opens a picker
+that previews on hover / arrow keys. There the choice is per browser, and the
+files are read from the server's `~/.config/todo/themes`, which is the same folder
+when the server runs on your machine. The web UI maps `bg`, `fg`, `muted`,
+`border` (dividers), `border_active` (accent), `selection_bg_inactive` (hover),
+`done`, `category` (tags) and `error`; roles a theme leaves out keep its usual look.
+
 ## CLI (`todo`)
 
 Categories are written as paths like `work/robotics` (case doesn't matter);
@@ -157,6 +164,7 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | POST   | `/api/categories`        | `{"name", "parentId"?}`                     | 201; 409 if name taken       |
 | PATCH  | `/api/categories/{id}`   | `{"name"?, "parentId"?}`                    | 400 if it would nest in itself |
 | DELETE | `/api/categories/{id}`   | –                                           | 204; contents move to parent |
+| GET    | `/api/themes`            | –                                           | `[{"name", "colors": {role: "#rrggbb"}}]` |
 
 `categoryId` / `parentId` are an id, or `null` for none / top level.
 

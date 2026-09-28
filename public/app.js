@@ -451,6 +451,118 @@ async function newCategory(parentId) {
 
 // ── Category menu ──
 
+// ── Themes ──
+// The server lists its themes (the same .theme files the TUI uses). Each one
+// only sets some roles; the rest keep this page's own colors.
+
+const THEME_VARS = {
+  bg: '--bg',
+  fg: '--text',
+  muted: '--muted',
+  border: '--faint',
+  border_active: '--accent',
+  selection_bg_inactive: '--hover',
+  error: '--danger',
+  category: '--category',
+  done: '--done',
+};
+let themeName = 'default';
+try { themeName = localStorage.getItem('theme') || 'default'; } catch {}
+
+const isDark = (hex) => {
+  const n = parseInt(hex.slice(1), 16);
+  return 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) < 128;
+};
+const mix = (a, b, pct) => `color-mix(in srgb, ${a} ${pct}%, ${b})`;
+
+// CSS properties for a theme's colors. A theme with its own background also
+// gets text colors that suit it, even if it doesn't set them.
+function themeVars(colors) {
+  const vars = {};
+  for (const [role, name] of Object.entries(THEME_VARS)) if (colors[role]) vars[name] = colors[role];
+  const bg = colors.bg;
+  if (bg) {
+    const dark = isDark(bg);
+    const text = vars['--text'] ??= dark ? '#e7e5e0' : '#1e2126';
+    vars['--muted'] ??= mix(text, bg, 55);
+    vars['--faint'] ??= mix(text, bg, 22);
+    vars['--hover'] ??= mix(text, 'transparent', 6);
+    vars['--raised'] = mix(bg, text, 94);
+    vars['color-scheme'] = dark ? 'dark' : 'light';
+  }
+  return vars;
+}
+
+function applyTheme(vars) {
+  const root = document.documentElement.style;
+  for (const name of [...Object.values(THEME_VARS), '--raised', 'color-scheme']) root.removeProperty(name);
+  for (const [name, value] of Object.entries(vars)) root.setProperty(name, value);
+}
+
+function saveTheme(name, vars) {
+  themeName = name;
+  try {
+    localStorage.setItem('theme', name);
+    localStorage.setItem('themeVars', JSON.stringify(vars));  // applied early by index.html
+  } catch {}
+}
+
+// Re-applies the saved theme from the server's copy, so edits to a theme
+// file show up on the next load.
+async function refreshTheme() {
+  const themes = await api('GET', '/themes').catch(() => null);
+  const theme = themes?.find((t) => t.name === themeName);
+  if (!theme) return;
+  const vars = themeVars(theme.colors);
+  applyTheme(vars);
+  saveTheme(theme.name, vars);
+}
+
+// Previews themes as you move through the list; Esc puts the old one back.
+async function pickTheme() {
+  let themes;
+  try {
+    themes = await api('GET', '/themes');
+  } catch (e) {
+    return showError(e);
+  }
+  const before = document.documentElement.getAttribute('style') || '';
+  const chosen = await openDialog((close) => {
+    const list = el('ul', { className: 'pick-list' }, ...themes.map((t) => {
+      const b = el('button', { type: 'button', textContent: t.name });
+      const swatch = el('span', { className: 'swatches' }, ...['bg', 'fg', 'border_active', 'done', 'error']
+        .filter((r) => t.colors[r]).map((r) => el('i', { style: `background:${t.colors[r]}` })));
+      b.append(swatch);
+      if (t.name === themeName) b.setAttribute('aria-current', 'true');
+      if (t.warnings) b.title = t.warnings.join('\n');
+      b.addEventListener('focus', () => applyTheme(themeVars(t.colors)));
+      b.addEventListener('mouseenter', () => b.focus());
+      b.addEventListener('click', () => close(t));
+      return el('li', {}, b);
+    }));
+    list.addEventListener('keydown', (e) => {
+      const step = { ArrowDown: 1, j: 1, ArrowUp: -1, k: -1 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const buttons = [...list.querySelectorAll('button')];
+      const i = buttons.indexOf(document.activeElement);
+      buttons[Math.max(0, Math.min(buttons.length - 1, i + step))].focus();
+    });
+    const cancel = el('button', { type: 'button', className: 'quiet', textContent: 'Cancel' });
+    cancel.addEventListener('click', () => close(undefined));
+    const hint = el('p', { className: 'small', textContent: 'Add your own in ~/.config/todo/themes on the server.' });
+    setTimeout(() => ($('[aria-current="true"]', list) || $('button', list))?.focus());
+    return [el('h2', { textContent: 'Theme' }), list, hint, el('div', { className: 'dialog-actions' }, cancel)];
+  });
+  if (chosen) {
+    const vars = themeVars(chosen.colors);
+    applyTheme(vars);
+    saveTheme(chosen.name, vars);
+  } else {
+    document.documentElement.setAttribute('style', before);
+  }
+}
+
 const menuBtn = $('#cat-menu-btn');
 const menu = $('#cat-menu');
 
@@ -527,6 +639,7 @@ $('#add-form').addEventListener('submit', (e) => {
 });
 
 $('#new-category').addEventListener('click', () => newCategory(null));
+$('#theme-btn').addEventListener('click', pickTheme);
 
 $('#nav-toggle').addEventListener('click', () => {
   const open = $('#sidebar').classList.toggle('open');
@@ -544,13 +657,17 @@ $('#clear-done').addEventListener('click', () => run(async () => {
   todos = todos.filter((t) => !t.done);
 }));
 
-// "/" or "n" jumps to the add field from anywhere.
+// "/" or "n" jumps to the add field from anywhere; "t" picks a theme.
 document.addEventListener('keydown', (e) => {
   if (dialog.open) return;
   const typing = e.target.matches('input, textarea');
   if (!typing && (e.key === '/' || e.key === 'n') && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     $('#new-title').focus();
+  }
+  if (!typing && e.key === 't' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    pickTheme();
   }
   if (typing && e.key === 'Escape' && e.target.id === 'new-title') e.target.blur();
 });
@@ -566,3 +683,4 @@ setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 
 view = readHash();
 load();
+refreshTheme();

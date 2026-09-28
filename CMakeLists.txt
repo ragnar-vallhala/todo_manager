@@ -20,13 +20,16 @@ add_executable(todo_server
   server/main.cc
   server/TodoStore.cc
   server/TodoController.cc
-  server/CategoryController.cc)
+  server/CategoryController.cc
+  server/ThemeController.cc)
+target_include_directories(todo_server PRIVATE common)
 target_link_libraries(todo_server PRIVATE Drogon::Drogon)
 target_compile_definitions(todo_server PRIVATE
   TODO_PUBLIC_DIR="${TODO_WEB_DIR}")
 
 # CLI client
 add_executable(todo cli/main.cc cli/Tui.cc)
+target_include_directories(todo PRIVATE common)
 target_link_libraries(todo PRIVATE Drogon::Drogon)
 
 install(TARGETS todo_server todo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
