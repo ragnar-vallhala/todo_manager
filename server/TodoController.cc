@@ -10,12 +10,12 @@ namespace
 constexpr size_t kMaxTitle = 500;
 }  // namespace
 
-// GET /api/todos[?status=all|pending|done]
+// GET /api/todos[?status=all|pending|done][&archived=1]
 void TodoController::list(const HttpRequestPtr &req, Callback &&cb)
 {
     const auto status = req->getParameter("status");
     Json::Value arr(Json::arrayValue);
-    for (const auto &t : TodoStore::get().list())
+    for (const auto &t : TodoStore::get().list(http::wantsArchived(req)))
     {
         if ((status == "pending" && t.done) || (status == "done" && !t.done))
             continue;
@@ -99,7 +99,7 @@ void TodoController::remove(const HttpRequestPtr &, Callback &&cb, int64_t id)
     cb(HttpResponse::newHttpResponse(k204NoContent, CT_NONE));
 }
 
-// DELETE /api/todos/done  -- remove all completed todos
+// DELETE /api/todos/done  -- remove completed todos, except archived ones
 void TodoController::clearDone(const HttpRequestPtr &, Callback &&cb)
 {
     Json::Value body;

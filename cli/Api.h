@@ -48,10 +48,12 @@ class Api
 
     const std::string &server() const { return server_; }
 
-    std::vector<TodoItem> list(const std::string &status = "all")
+    // With `archived`, also todos in archived categories.
+    std::vector<TodoItem> list(const std::string &status = "all", bool archived = false)
     {
         std::vector<TodoItem> out;
-        auto json = send(drogon::Get, "/api/todos?status=" + status);
+        auto json = send(drogon::Get, "/api/todos?status=" + status +
+                                          (archived ? "&archived=1" : ""));
         for (const auto &v : json)
             out.push_back(TodoItem::fromJson(v));
         return out;
@@ -93,10 +95,12 @@ class Api
         return send(drogon::Delete, "/api/todos/done")["removed"].asUInt64();
     }
 
-    CategoryTree categories()
+    // With `archived`, archived categories are included (see CategoryTree::inArchive).
+    CategoryTree categories(bool archived = false)
     {
         std::vector<CategoryItem> out;
-        for (const auto &v : send(drogon::Get, "/api/categories"))
+        for (const auto &v : send(drogon::Get, archived ? "/api/categories?archived=1"
+                                                        : "/api/categories"))
             out.push_back(CategoryItem::fromJson(v));
         return CategoryTree(std::move(out));
     }
@@ -120,6 +124,13 @@ class Api
     {
         Json::Value body;
         body["parentId"] = ref(parentId);
+        return CategoryItem::fromJson(send(drogon::Patch, catPath(id), &body));
+    }
+
+    CategoryItem setCategoryArchived(int64_t id, bool archived)
+    {
+        Json::Value body;
+        body["archived"] = archived;
         return CategoryItem::fromJson(send(drogon::Patch, catPath(id), &body));
     }
 

@@ -629,9 +629,10 @@ enum class Mode
 enum class Focus { Categories, Todos };
 enum class PickFor { ShowCategory, MoveTodo, MoveCategory, Theme };
 
-// Pseudo-categories at the top of the categories panel.
-constexpr int64_t kAll = -1;   // every todo
-constexpr int64_t kInbox = 0;  // todos without a category
+// Pseudo-categories in the categories panel.
+constexpr int64_t kAll = -1;      // every todo not in the archive
+constexpr int64_t kInbox = 0;     // todos without a category
+constexpr int64_t kArchive = -2;  // archived categories, listed last
 
 const std::vector<std::pair<const char *, const char *>> kHelp = {
     {"j/k  ↑/↓", "move"},
@@ -643,6 +644,7 @@ const std::vector<std::pair<const char *, const char *>> kHelp = {
     {"e", "edit todo / rename category"},
     {"m", "move to another category"},
     {"d", "delete"},
+    {"A", "archive / unarchive category"},
     {"c", "jump to a category"},
     {"C", "clear all completed"},
     {"/", "search (esc clears)"},
@@ -685,6 +687,7 @@ struct CatRow
     std::string name;
     int depth;
     bool hasChildren;
+    bool archived;
 };
 
 struct PickOption
@@ -697,7 +700,7 @@ struct PickOption
 class App
 {
   public:
-    explicit App(Api &api) : api_(api) {}
+    explicit App(Api &api) : api_(api) { collapsed_.insert(kArchive); }
 
     int run()
     {
@@ -724,8 +727,8 @@ class App
         lastLoad_ = Clock::now();
         try
         {
-            todos_ = api_.list();
-            tree_ = api_.categories();
+            todos_ = api_.list("all", true);
+            tree_ = api_.categories(true);
             online_ = true;
         }
         catch (const ApiError &e)
@@ -763,14 +766,23 @@ class App
         flashUntil_ = Clock::now() + std::chrono::seconds(3);
     }
 
-    // Is todo t shown when category `view` (kAll, kInbox or an id) is selected?
+    // Is todo t shown when category `view` (kAll, kInbox, kArchive or an id)
+    // is selected? Archived todos only show inside archived categories.
     bool inView(const TodoItem &t, int64_t view) const
     {
         if (view == kAll)
-            return true;
+            return !tree_.inArchive(t.categoryId);
         if (view == kInbox)
             return t.categoryId == 0;
-        return tree_.isWithin(t.categoryId, view);
+        if (view == kArchive)
+            return tree_.inArchive(t.categoryId);
+        return tree_.isWithin(t.categoryId, view) &&
+               (tree_.inArchive(view) || !tree_.inArchive(t.categoryId));
+    }
+
+    bool doneOutsideArchive(const TodoItem &t) const
+    {
+        return t.done && !tree_.inArchive(t.categoryId);
     }
 
     size_t openCount(int64_t view) const
@@ -781,7 +793,10 @@ class App
 
     std::string viewName(int64_t view) const
     {
-        return view == kAll ? "All" : view == kInbox ? "Inbox" : tree_.path(view);
+        return view == kAll       ? "All"
+               : view == kInbox   ? "Inbox"
+               : view == kArchive ? "Archived"
+                                  : tree_.path(view);
     }
 
     // Where new todos/subcategories go: the selected category, else none.
@@ -789,19 +804,43 @@ class App
 
     std::vector<CatRow> catRows() const
     {
-        std::vector<CatRow> rows{{kAll, "All", 0, false}, {kInbox, "Inbox", 0, false}};
-        addCatRows(0, 0, rows);
+        std::vector<CatRow> rows{{kAll, "All", 0, false, false},
+                                 {kInbox, "Inbox", 0, false, false}};
+        addCatRows(0, 0, false, rows);
+        const auto archived = tree_.archiveRoots();
+        if (archived.empty())
+            return rows;
+        rows.push_back({kArchive, "Archived", 0, true, false});
+        if (collapsed_.count(kArchive))
+            return rows;
+        // Each archived category by its full path, with its subtree below.
+        for (const auto *c : archived)
+        {
+            const bool kids = !tree_.children(c->id).empty();
+            rows.push_back({c->id, tree_.path(c->id), 1, kids, true});
+            if (kids && !collapsed_.count(c->id))
+                addCatRows(c->id, 2, true, rows);
+        }
         return rows;
     }
 
-    void addCatRows(int64_t parent, int depth, std::vector<CatRow> &rows) const
+    // Outside the archive, archived categories are skipped.
+    void addCatRows(int64_t parent, int depth, bool archived, std::vector<CatRow> &rows) const
     {
-        for (const auto *c : tree_.children(parent))
+        auto shown = [&](int64_t id) {
+            auto kids = tree_.children(id);
+            if (!archived)
+                kids.erase(std::remove_if(kids.begin(), kids.end(),
+                                          [](const auto *c) { return c->archived; }),
+                           kids.end());
+            return kids;
+        };
+        for (const auto *c : shown(parent))
         {
-            const bool kids = !tree_.children(c->id).empty();
-            rows.push_back({c->id, c->name, depth, kids});
+            const bool kids = !shown(c->id).empty();
+            rows.push_back({c->id, c->name, depth, kids, archived});
             if (kids && !collapsed_.count(c->id))
-                addCatRows(c->id, depth + 1, rows);
+                addCatRows(c->id, depth + 1, archived, rows);
         }
     }
 
@@ -849,13 +888,16 @@ class App
             return -1;
         };
         long idx = findRow(catSelId_);
-        // Hidden by a folded parent, or deleted: fall back to an ancestor.
+        // Hidden by a folded parent, or deleted: fall back to an ancestor,
+        // or to the Archived row.
         for (int64_t id = catSelId_; idx < 0 && id > 0;)
         {
             const auto *c = tree_.find(id);
             id = c ? c->parentId : 0;
             idx = id > 0 ? findRow(id) : -1;
         }
+        if (idx < 0 && catSelId_ > 0 && tree_.inArchive(catSelId_))
+            idx = findRow(kArchive);
         catSel_ = idx < 0 ? 0 : static_cast<size_t>(idx);
         catSelId_ = rows[catSel_].id;
 
@@ -887,6 +929,8 @@ class App
         // Unfold ancestors so the row is visible.
         for (const auto *c = tree_.find(id); c; c = tree_.find(c->parentId))
             collapsed_.erase(c->parentId);
+        if (id > 0 && tree_.inArchive(id))
+            collapsed_.erase(kArchive);
         catSelId_ = id;
         sel_ = 0;
         selId_ = 0;
@@ -984,12 +1028,14 @@ class App
                     current = c->parentId;
                 break;
         }
-        for (const auto &[c, depth] : tree_.flatten())
+        for (const auto &[c, depth] : tree_.flatten(0, true))
         {
             if (purpose == PickFor::MoveCategory && tree_.isWithin(c->id, subject))
                 continue;  // can't move a category inside itself
             pickOptions_.push_back({c->id, c->name, depth});
         }
+        if (purpose == PickFor::ShowCategory && !tree_.archiveRoots().empty())
+            pickOptions_.push_back({kArchive, "Archived", 0});
         pickSel_ = 0;
         for (size_t i = 0; i < pickOptions_.size(); ++i)
             if (pickOptions_[i].id == current)
@@ -1111,7 +1157,8 @@ class App
             openPicker(PickFor::ShowCategory, 0);
         else if (k.is("C"))
         {
-            if (std::any_of(todos_.begin(), todos_.end(), [](auto &t) { return t.done; }))
+            if (std::any_of(todos_.begin(), todos_.end(),
+                            [&](auto &t) { return doneOutsideArchive(t); }))
                 mode_ = Mode::ConfirmClear;
             else
                 flash("No completed todos to clear", false);
@@ -1159,10 +1206,11 @@ class App
             focus_ = Focus::Todos;
         else if (k.is(" "))
         {
-            if (cat && !tree_.children(cat->id).empty())
+            auto rows = catRows();
+            if (catSel_ < rows.size() && rows[catSel_].hasChildren)
             {
-                if (!collapsed_.erase(cat->id))
-                    collapsed_.insert(cat->id);
+                if (!collapsed_.erase(catSelId_))
+                    collapsed_.insert(catSelId_);
             }
         }
         else if (k.is("a"))
@@ -1176,6 +1224,24 @@ class App
             cat ? openPicker(PickFor::MoveCategory, cat->id) : needCategory();
         else if (k.is("d") || k.is("x") || k.type == Key::Del)
             cat ? void(mode_ = Mode::ConfirmDeleteCategory) : needCategory();
+        else if (k.is("A"))
+            cat ? toggleArchived(*cat) : needCategory();
+    }
+
+    void toggleArchived(const CategoryItem &cat)
+    {
+        const int64_t id = cat.id;
+        const std::string name = tree_.path(id);
+        if (!cat.archived && tree_.inArchive(id))
+        {
+            flash(name + " is inside an archived category; unarchive that instead", true);
+            return;
+        }
+        const bool archive = !cat.archived;
+        if (!act([&] { api_.setCategoryArchived(id, archive); }))
+            return;
+        flash((archive ? "Archived " : "Unarchived ") + name, false);
+        selectCategory(id);  // it moved to / from the Archived section
     }
 
     void handleTodoKeys(const Key &k)
@@ -1482,7 +1548,7 @@ class App
             const bool pseudo = row.id <= 0;
             c_.text(cx, line, truncate(row.name, countX - 1 - cx),
                     Style(sel ? theme_.selectionFg : pseudo ? Default : theme_.category, bg,
-                          sel ? Bold : 0),
+                          sel ? Bold : row.archived ? Dim : 0),
                     maxX);
             c_.text(countX, line, n, sel ? Style(theme_.selectionFg, bg) : muted(bg), maxX);
         }
@@ -1619,6 +1685,7 @@ class App
                       {"e", "rename"},
                       {"m", "move"},
                       {"d", "delete"},
+                      {"A", "archive"},
                       {"space", "fold"},
                       {"n", "new todo"},
                       {"?", "help"},
@@ -1678,8 +1745,11 @@ class App
         if (mode_ == Mode::ConfirmClear)
         {
             title = "Clear completed";
-            auto n = std::count_if(todos_.begin(), todos_.end(), [](auto &t) { return t.done; });
+            auto n = std::count_if(todos_.begin(), todos_.end(),
+                                   [&](auto &t) { return doneOutsideArchive(t); });
             lines.push_back("Delete " + std::to_string(n) + " completed todo(s)?");
+            if (n != std::count_if(todos_.begin(), todos_.end(), [](auto &t) { return t.done; }))
+                lines.push_back("Completed todos in archived categories are kept.");
         }
         else if (mode_ == Mode::ConfirmDeleteCategory)
         {

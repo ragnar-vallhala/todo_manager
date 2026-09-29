@@ -3,6 +3,7 @@
 
 #include "TodoStore.h"
 
+#include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
 
 #include <optional>
@@ -37,6 +38,14 @@ inline std::string trim(const std::string &s)
     if (b == std::string::npos)
         return "";
     return s.substr(b, s.find_last_not_of(ws) - b + 1);
+}
+
+// True if the request asks to include archived categories and their todos
+// (`?archived=1`).
+inline bool wantsArchived(const drogon::HttpRequestPtr &req)
+{
+    const auto v = req->getParameter("archived");
+    return v == "1" || v == "true";
 }
 
 // Reads an optional id reference such as "categoryId". Absent leaves `out`

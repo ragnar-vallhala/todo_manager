@@ -146,6 +146,9 @@ svg {
 .nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-count { font-weight: 400; color: var(--muted); font-size: 0.8125rem; padding-top: 1px; }
 
+#nav-archive:not(:empty) { margin-top: 14px; }
+.nav-row.archived .nav-name { opacity: 0.7; }
+
 #new-category { margin: 14px 0 0 22px; }
 #theme-btn { display: block; margin: 6px 0 0 22px; }
 
@@ -174,6 +177,14 @@ svg {
 .crumbs button:hover { color: var(--text); }
 .crumbs .here { color: var(--text); font-weight: 500; }
 .crumbs .sep { color: var(--faint); }
+.crumbs .badge {
+  align-self: center;
+  padding: 0 6px;
+  border: 1px solid var(--faint);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
 
 .menu-wrap { position: relative; }
 

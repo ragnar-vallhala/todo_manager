@@ -7,22 +7,26 @@ const el = (tag, props = {}, ...children) => {
 const tpl = $('#item-tpl');
 const ALL = 'all';
 const INBOX = 'inbox';
+const ARCHIVE = 'archive';  // every archived category
 
 let todos = [];
 let cats = [];
-let view = ALL;           // ALL, INBOX, or a category id
+let view = ALL;           // ALL, INBOX, ARCHIVE, or a category id
 let seen = null;          // ids already on screen, so only new rows animate in
 let showDone = false;
+let showArchive = false;  // the sidebar's Archived section is unfolded
 let collapsed = new Set();
 
 try {
   showDone = localStorage.getItem('showDone') === '1';
+  showArchive = localStorage.getItem('showArchive') === '1';
   collapsed = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'));
 } catch {}
 
 function remember() {
   try {
     localStorage.setItem('showDone', showDone ? '1' : '0');
+    localStorage.setItem('showArchive', showArchive ? '1' : '0');
     localStorage.setItem('collapsed', JSON.stringify([...collapsed]));
   } catch {}
 }
@@ -64,8 +68,11 @@ async function run(fn) {
   render();
 }
 
+// Everything, archived included; views filter it (see inView).
 async function fetchAll() {
-  [todos, cats] = await Promise.all([api('GET', '/todos'), api('GET', '/categories')]);
+  const first = !cats.length;
+  [todos, cats] = await Promise.all([api('GET', '/todos?archived=1'), api('GET', '/categories?archived=1')]);
+  if (first) revealArchive();  // opened on an archived category's link
 }
 
 const load = () => run(fetchAll);
@@ -91,43 +98,69 @@ function isWithin(id, ancestor) {
   return false;
 }
 
-// Categories below `parentId` in display order, with depth.
+// True if category `id` or one of its ancestors is archived.
+function inArchive(id) {
+  for (let c = findCat(id); c; c = findCat(c.parentId)) if (c.archived) return true;
+  return false;
+}
+const viewArchived = (v = view) => v === ARCHIVE || (typeof v === 'number' && inArchive(v));
+
+// The outermost archived categories, sorted by path.
+const archiveRoots = () => cats.filter((c) => c.archived && !inArchive(c.parentId))
+  .sort((a, b) => pathName(a.id).localeCompare(pathName(b.id), undefined, { sensitivity: 'base' }));
+
+// Categories below `parentId` in display order, with depth. Archived ones are
+// left out, unless `parentId` is itself in the archive.
 function flatten(parentId = null, depth = 0, out = [], skipCollapsed = false) {
+  const archived = inArchive(parentId);
   for (const c of children(parentId)) {
+    if (c.archived && !archived) continue;
     out.push({ cat: c, depth });
     if (!(skipCollapsed && collapsed.has(c.id))) flatten(c.id, depth + 1, out, skipCollapsed);
   }
   return out;
 }
 
+// Archived todos only show up inside archived categories.
 function inView(todo, v = view) {
-  if (v === ALL) return true;
+  if (v === ALL) return !inArchive(todo.categoryId);
   if (v === INBOX) return todo.categoryId == null;
-  return isWithin(todo.categoryId, v);
+  if (v === ARCHIVE) return inArchive(todo.categoryId);
+  return isWithin(todo.categoryId, v) && (inArchive(v) || !inArchive(todo.categoryId));
 }
 
 const openIn = (v) => todos.filter((t) => !t.done && inView(t, v)).length;
 const viewTarget = () => (typeof view === 'number' ? view : null);
 
-// ── Routing: #/inbox, #/c/12 ──
+// ── Routing: #/inbox, #/archived, #/c/12 ──
 
 function readHash() {
   const h = location.hash;
   if (h === '#/inbox') return INBOX;
+  if (h === '#/archived') return ARCHIVE;
   const m = h.match(/^#\/c\/(\d+)$/);
   return m ? Number(m[1]) : ALL;
 }
 
 function go(v) {
-  const hash = v === ALL ? '#/' : v === INBOX ? '#/inbox' : `#/c/${v}`;
+  const hash = v === ALL ? '#/' : v === INBOX ? '#/inbox' : v === ARCHIVE ? '#/archived' : `#/c/${v}`;
   if (location.hash !== hash) history.pushState(null, '', hash);
   view = v;
+  revealArchive();
   $('#sidebar').classList.remove('open');
   $('#nav-toggle').setAttribute('aria-expanded', 'false');
   render();
 }
 
-window.addEventListener('popstate', () => { view = readHash(); render(); });
+// Unfolds the sidebar's Archived section when showing something archived.
+function revealArchive() {
+  if (viewArchived() && !showArchive) {
+    showArchive = true;
+    remember();
+  }
+}
+
+window.addEventListener('popstate', () => { view = readHash(); revealArchive(); render(); });
 
 // ── Rendering ──
 
@@ -142,20 +175,26 @@ function render() {
   seen = new Set(todos.map((t) => t.id));
 }
 
+// `fold` is a category id, or ARCHIVE for the Archived section.
+const isFolded = (fold) => (fold === ARCHIVE ? !showArchive : collapsed.has(fold));
+function toggleFold(fold) {
+  if (fold === ARCHIVE) showArchive = !showArchive;
+  else collapsed.has(fold) ? collapsed.delete(fold) : collapsed.add(fold);
+  remember();
+  render();
+}
+
 function navRow(v, name, { depth = 0, fold = null } = {}) {
   const row = el('div', { className: 'nav-row' });
   row.style.paddingLeft = `${depth * 14}px`;
+  if (typeof v === 'number' && inArchive(v)) row.classList.add('archived');
 
   if (fold) {
-    const expanded = !collapsed.has(fold);
+    const expanded = !isFolded(fold);
     const btn = el('button', { className: 'fold', ariaLabel: expanded ? 'Collapse' : 'Expand' });
     btn.setAttribute('aria-expanded', String(expanded));
     btn.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>';
-    btn.addEventListener('click', () => {
-      collapsed.has(fold) ? collapsed.delete(fold) : collapsed.add(fold);
-      remember();
-      render();
-    });
+    btn.addEventListener('click', () => toggleFold(fold));
     row.append(btn);
   } else {
     row.append(el('span', { className: 'fold-spacer' }));
@@ -194,8 +233,24 @@ function navRow(v, name, { depth = 0, fold = null } = {}) {
 
 function renderSidebar() {
   $('#nav-fixed').replaceChildren(navRow(ALL, 'All'), navRow(INBOX, 'Inbox'));
-  $('#nav-tree').replaceChildren(...flatten(null, 0, [], true).map(({ cat, depth }) =>
-    navRow(cat.id, cat.name, { depth, fold: children(cat.id).length ? cat.id : null })));
+  // Folds only if something shows below it (archived children don't, outside the archive).
+  const catRow = ({ cat, depth }, name = cat.name) =>
+    navRow(cat.id, name, { depth, fold: flatten(cat.id).length ? cat.id : null });
+  $('#nav-tree').replaceChildren(...flatten(null, 0, [], true).map((r) => catRow(r)));
+
+  // Archived: each outermost archived category by its full path, then its subtree.
+  const roots = archiveRoots();
+  const rows = [];
+  if (roots.length) {
+    rows.push(navRow(ARCHIVE, 'Archived', { fold: ARCHIVE }));
+    if (showArchive) {
+      for (const cat of roots) {
+        rows.push(catRow({ cat, depth: 1 }, pathName(cat.id)));
+        if (!collapsed.has(cat.id)) rows.push(...flatten(cat.id, 2, [], true).map((r) => catRow(r)));
+      }
+    }
+  }
+  $('#nav-archive').replaceChildren(...rows);
 }
 
 function renderHeader() {
@@ -204,8 +259,8 @@ function renderHeader() {
     crumbs.replaceChildren(el('span', {
       textContent: new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
     }));
-  } else if (view === INBOX) {
-    crumbs.replaceChildren(el('span', { className: 'here', textContent: 'Inbox' }));
+  } else if (view === INBOX || view === ARCHIVE) {
+    crumbs.replaceChildren(el('span', { className: 'here', textContent: view === INBOX ? 'Inbox' : 'Archived' }));
   } else {
     const parts = pathOf(view);
     const nodes = [];
@@ -218,6 +273,7 @@ function renderHeader() {
         nodes.push(b);
       }
     });
+    if (inArchive(view)) nodes.push(el('span', { className: 'badge', textContent: 'Archived' }));
     crumbs.replaceChildren(...nodes);
   }
 
@@ -226,6 +282,13 @@ function renderHeader() {
   $('#cat-menu-btn').hidden = typeof view !== 'number';
   const cat = findCat(view);
   $('#new-title').placeholder = cat ? `Add to ${cat.name}` : "What's next?";
+  $('#add-form').hidden = view === ARCHIVE;
+  $('#clear-done').hidden = viewArchived();  // the server keeps archived todos anyway
+
+  // Only the archived category itself can be unarchived, not one inside it.
+  const archiveItem = $('[data-action="archive"]', menu);
+  archiveItem.textContent = cat?.archived ? 'Unarchive' : 'Archive';
+  archiveItem.hidden = !cat || (!cat.archived && inArchive(cat.id));
 }
 
 function renderTodos() {
@@ -242,6 +305,11 @@ function renderTodos() {
     for (const { cat } of flatten()) groups.push({ id: cat.id, title: pathName(cat.id), todos: direct(cat.id) });
   } else if (view === INBOX) {
     groups.push({ id: null, todos: open });
+  } else if (view === ARCHIVE) {
+    for (const root of archiveRoots()) {
+      groups.push({ id: root.id, title: pathName(root.id), todos: direct(root.id) });
+      for (const { cat } of flatten(root.id)) groups.push({ id: cat.id, title: pathName(cat.id), todos: direct(cat.id) });
+    }
   } else {
     groups.push({ id: view, todos: direct(view) });
     for (const { cat } of flatten(view)) groups.push({ id: cat.id, title: pathName(cat.id, view), todos: direct(cat.id) });
@@ -260,9 +328,12 @@ function renderTodos() {
 
   const empty = $('#empty');
   empty.hidden = open.length > 0;
-  empty.textContent = view === ALL && !todos.length
-    ? 'Nothing here yet. Type above and press Enter to add your first todo.'
-    : 'Nothing open here. Type above and press Enter to add one.';
+  empty.textContent = view === ARCHIVE
+    ? (archiveRoots().length ? 'Nothing open in archived categories.'
+                             : 'Nothing archived. Archive a category from its ⋯ menu.')
+    : view === ALL && !todos.length
+      ? 'Nothing here yet. Type above and press Enter to add your first todo.'
+      : 'Nothing open here. Type above and press Enter to add one.';
 
   $('#done-section').hidden = done.length === 0;
   $('#done-count').textContent = `${done.length} done`;
@@ -339,6 +410,8 @@ function startEdit(title, todo) {
 let dragging = null;  // { kind: 'todo' | 'cat', id }
 
 function canDrop(v) {
+  // Dropping a category on Archived archives it.
+  if (v === ARCHIVE) return dragging.kind === 'cat' && !inArchive(dragging.id);
   if (dragging.kind === 'todo') return v !== ALL;
   // Categories go to the top level (All) or into a category outside themselves.
   if (v === INBOX) return false;
@@ -351,6 +424,8 @@ function dropOn(v) {
   if (!d) return;
   if (d.kind === 'todo') {
     run(() => api('PATCH', `/todos/${d.id}`, { categoryId: v === INBOX ? null : v }).then(fetchAll));
+  } else if (v === ARCHIVE) {
+    run(() => api('PATCH', `/categories/${d.id}`, { archived: true }).then(fetchAll));
   } else {
     run(() => api('PATCH', `/categories/${d.id}`, { parentId: v === ALL ? null : v }).then(fetchAll));
   }
@@ -608,6 +683,16 @@ menu.addEventListener('click', async (e) => {
     });
   }
 
+  if (action === 'archive') {
+    const archived = !cat.archived;
+    return run(async () => {
+      await api('PATCH', `/categories/${cat.id}`, { archived });
+      await fetchAll();
+      // An archived category moves to the Archived section; stay on it there.
+      revealArchive();
+    });
+  }
+
   if (action === 'delete') {
     const parent = findCat(cat.parentId);
     const where = parent ? parent.name : 'the top level';
@@ -652,9 +737,10 @@ $('#done-toggle').addEventListener('click', () => {
   render();
 });
 
+// The server keeps completed todos in archived categories, so reload.
 $('#clear-done').addEventListener('click', () => run(async () => {
   await api('DELETE', '/todos/done');
-  todos = todos.filter((t) => !t.done);
+  await fetchAll();
 }));
 
 // "/" or "n" jumps to the add field from anywhere; "t" picks a theme.

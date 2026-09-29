@@ -50,10 +50,18 @@ must have different names (case-insensitive), and names can't contain `/`.
 Deleting a category never deletes todos: its todos and subcategories move up to
 its parent.
 
+Archiving a category hides it, its subcategories and all their todos from the
+normal views and counts, without deleting anything. Archived categories are
+listed under **Archived** (at the bottom of the sidebar / categories panel),
+where you can still open, edit and unarchive them. "Clear completed" leaves
+completed todos in archived categories alone. To bring back a category that is
+inside an archived one, unarchive the archived one.
+
 In the web UI: pick a category in the sidebar (on phones, the ≡ button), and new
 todos go into it. The `⋯` next to the open count has New subcategory / Rename /
-Move / Delete. Move a todo with its folder icon, or drag it onto a sidebar
-category; drag categories onto each other to nest them.
+Move / Archive (or Unarchive) / Delete. Move a todo with its folder icon, or drag it onto a sidebar
+category; drag categories onto each other to nest them, or onto **Archived** to
+archive them.
 
 ## Interactive UI
 
@@ -69,6 +77,7 @@ focused panel; `?` shows them all.
 | `e` | edit title | rename |
 | `m` | move to category | move into another category |
 | `d` | delete (asks) | delete (asks) |
+| `A` | | archive / unarchive |
 | `space` | toggle done | fold / unfold |
 
 Anywhere: `n` new todo, `c` jump to a category, `/` search (a number also matches
@@ -135,6 +144,9 @@ todo cat add work/robotics/rover   # creates missing parents too
 todo cat rename work/robotics Lab
 todo cat mv work/lab /          # move to top level
 todo cat rm work/lab            # its todos/subcategories move to its parent
+todo cat archive work/lab       # hide it from lists; `todo cat ls -a` shows it
+todo cat unarchive work/lab
+todo ls -c work/lab             # an archived category's todos
 ```
 
 The server it talks to is, first match wins: `-s URL`, `$TODO_SERVER`, the first line
@@ -155,22 +167,25 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 
 | Method | Path                     | Body                                        | Notes                        |
 |--------|--------------------------|---------------------------------------------|------------------------------|
-| GET    | `/api/todos`             | –                                           | `?status=all\|pending\|done` |
+| GET    | `/api/todos`             | –                                           | `?status=all\|pending\|done`, `&archived=1` |
 | POST   | `/api/todos`             | `{"title", "categoryId"?}`                  | 201 → created todo           |
 | PATCH  | `/api/todos/{id}`        | `{"title"?, "done"?, "categoryId"?}`        | → updated todo               |
 | DELETE | `/api/todos/{id}`        | –                                           | 204                          |
-| DELETE | `/api/todos/done`        | –                                           | → `{"removed": n}`           |
-| GET    | `/api/categories`        | –                                           | flat list                    |
+| DELETE | `/api/todos/done`        | –                                           | → `{"removed": n}`; keeps archived |
+| GET    | `/api/categories`        | –                                           | flat list; `?archived=1`     |
 | POST   | `/api/categories`        | `{"name", "parentId"?}`                     | 201; 409 if name taken       |
-| PATCH  | `/api/categories/{id}`   | `{"name"?, "parentId"?}`                    | 400 if it would nest in itself |
+| PATCH  | `/api/categories/{id}`   | `{"name"?, "parentId"?, "archived"?}`       | 400 if it would nest in itself |
 | DELETE | `/api/categories/{id}`   | –                                           | 204; contents move to parent |
 | GET    | `/api/themes`            | –                                           | `[{"name", "colors": {role: "#rrggbb"}}]` |
 
 `categoryId` / `parentId` are an id, or `null` for none / top level.
+Without `archived=1`, the lists leave out archived categories, everything below
+them, and their todos (so older clients simply don't see them). A category's
+`archived` is only its own flag; one inside an archived category is archived too.
 
 ```json
 {"id": 1, "title": "Buy milk", "done": false, "createdAt": 1790319063, "categoryId": 3}
-{"id": 3, "name": "Robotics", "parentId": 1, "createdAt": 1790319063}
+{"id": 3, "name": "Robotics", "parentId": 1, "createdAt": 1790319063, "archived": false}
 ```
 
 Errors return `{"error": "..."}` with a 4xx status. The data file holds

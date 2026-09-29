@@ -32,6 +32,7 @@ With no command, opens the interactive UI (press ? inside for keys).
 Todos:
   ui                                  open the interactive UI
   list, ls [all|pending|done] [-c CAT]  show todos, grouped by category
+                                      (archived ones only with -c ARCHIVED_CAT)
   add [-c CAT] <title...>             add a todo (to category CAT)
   done <id...>                        mark todo(s) done
   undo <id...>                        mark todo(s) not done
@@ -41,12 +42,15 @@ Todos:
   clear                               delete all completed todos
 
 Categories (CAT is a path like work/robotics; case doesn't matter):
-  cat [ls]                            show the category tree
+  cat [ls] [-a]                       show the category tree (-a: and archived)
   cat add <CAT>                       create a category (and missing parents)
   cat rename <CAT> <name>             rename a category
   cat mv <CAT> <PARENT>               move a category ("/" = top level)
   cat rm <CAT>                        delete a category; its todos and
                                       subcategories move to its parent
+  cat archive <CAT>                   hide a category, its subcategories and
+                                      todos from lists; `clear` keeps them
+  cat unarchive <CAT>                 bring an archived category back
 
 Server URL, first match wins: -s/--server URL, $TODO_SERVER, the first line
 of ~/.config/todo/server, else http://127.0.0.1:27183
@@ -145,11 +149,14 @@ int cmdList(Api &api, std::vector<std::string> args)
     if (status != "all" && status != "pending" && status != "done")
         throw UsageError("status must be all, pending or done");
 
-    auto tree = api.categories();
+    auto tree = api.categories(true);
     const int64_t root = catPath ? resolveCategory(tree, *catPath) : 0;
+    // Archived todos only show up when looking inside an archived category.
+    const bool archived = tree.inArchive(root);
     std::vector<TodoItem> todos;
-    for (auto &t : api.list(status))
-        if (!catPath || tree.isWithin(t.categoryId, root) || (root == 0 && t.categoryId == 0))
+    for (auto &t : api.list(status, true))
+        if ((!catPath || tree.isWithin(t.categoryId, root) || (root == 0 && t.categoryId == 0)) &&
+            (archived || !tree.inArchive(t.categoryId)))
             todos.push_back(t);
 
     if (todos.empty())
@@ -191,11 +198,12 @@ int cmdList(Api &api, std::vector<std::string> args)
         }
         else
         {
-            std::cout << c("1;36", tree.path(root)) << "\n";
+            std::cout << c("1;36", tree.path(root)) << (archived ? c("2", "  (archived)") : "")
+                      << "\n";
             printGroup(root, 2);
             base = 1;
         }
-        for (const auto &[cat, depth] : tree.flatten(root))
+        for (const auto &[cat, depth] : tree.flatten(root, !archived))
         {
             if (!anyWithin(cat->id))
                 continue;
@@ -246,14 +254,17 @@ int cmdMove(Api &api, const std::vector<std::string> &args)
 
 // ── categories ──
 
-int cmdCategoryTree(Api &api)
+int cmdCategoryTree(Api &api, bool showArchived)
 {
-    auto tree = api.categories();
-    auto todos = api.list("pending");
+    auto tree = api.categories(true);
+    auto todos = api.list("pending", true);
+    // Archived todos only count towards archived categories.
     auto openIn = [&](int64_t id, bool exact) {
+        const bool archived = tree.inArchive(id);
         size_t n = 0;
         for (const auto &t : todos)
-            n += exact ? t.categoryId == id : tree.isWithin(t.categoryId, id);
+            if (archived || !tree.inArchive(t.categoryId))
+                n += exact ? t.categoryId == id : tree.isWithin(t.categoryId, id);
         return n;
     };
     auto line = [&](int indent, const std::string &name, const char *style, size_t open) {
@@ -264,20 +275,44 @@ int cmdCategoryTree(Api &api)
     };
 
     line(0, "Inbox", "1", openIn(0, true));
-    for (const auto &[cat, depth] : tree.flatten())
+    for (const auto &[cat, depth] : tree.flatten(0, true))
         line(2 * depth, cat->name, "1;36", openIn(cat->id, false));
     if (tree.empty())
         std::cout << c("2", "No categories yet. Create one with: todo cat add <name>") << "\n";
+
+    const auto archived = tree.archiveRoots();
+    if (archived.empty())
+        return 0;
+    if (!showArchived)
+    {
+        std::cout << c("2", std::to_string(archived.size()) +
+                                " archived (see them with: todo cat ls -a)")
+                  << "\n";
+        return 0;
+    }
+    std::cout << c("1", "Archived") << "\n";
+    for (const auto *root : archived)
+    {
+        line(2, tree.path(root->id), "2;36", openIn(root->id, false));
+        for (const auto &[cat, depth] : tree.flatten(root->id))
+            line(2 * depth + 4, cat->name, "2;36", openIn(cat->id, false));
+    }
     return 0;
 }
 
 int cmdCategory(Api &api, const std::vector<std::string> &args)
 {
-    const std::string sub = args.size() > 1 ? args[1] : "ls";
+    const std::string sub = args.size() > 1 && args[1][0] != '-' ? args[1] : "ls";
     if (sub == "ls" || sub == "list")
-        return cmdCategoryTree(api);
+    {
+        const std::string opt = args.size() > 2 ? args[2] : args.size() > 1 ? args[1] : "";
+        if (!opt.empty() && opt != "ls" && opt != "list" && opt != "-a" && opt != "--archived")
+            throw UsageError("usage: todo cat [ls] [-a]");
+        return cmdCategoryTree(api, opt == "-a" || opt == "--archived");
+    }
 
-    auto tree = api.categories();
+    // Archived categories too, so every command can find them by path.
+    auto tree = api.categories(true);
 
     if (sub == "add")
     {
@@ -349,7 +384,35 @@ int cmdCategory(Api &api, const std::vector<std::string> &args)
         return 0;
     }
 
-    throw UsageError("unknown `todo cat` command '" + sub + "' (try: ls, add, rename, mv, rm)");
+    if (sub == "archive" || sub == "unarchive")
+    {
+        const bool archive = sub == "archive";
+        if (args.size() != 3)
+            throw UsageError("usage: todo cat " + sub + " <CAT>");
+        const int64_t id = resolveCategory(tree, args[2]);
+        if (id == 0)
+            throw UsageError("choose a category to " + sub);
+        const auto *cat = tree.find(id);
+        if (archive && tree.inArchive(id))
+            throw UsageError(tree.path(id) + " is already archived");
+        if (!archive && !cat->archived)
+        {
+            if (!tree.inArchive(id))
+                throw UsageError(tree.path(id) + " isn't archived");
+            int64_t outer = id;  // the archived ancestor that hides it
+            for (const auto *p = cat; p; p = tree.find(p->parentId))
+                if (p->archived)
+                    outer = p->id;
+            throw UsageError(tree.path(id) + " is inside archived " + tree.path(outer) +
+                             "; unarchive that instead");
+        }
+        api.setCategoryArchived(id, archive);
+        std::cout << (archive ? "Archived " : "Unarchived ") << c("1;36", tree.path(id)) << "\n";
+        return 0;
+    }
+
+    throw UsageError("unknown `todo cat` command '" + sub +
+                     "' (try: ls, add, rename, mv, rm, archive, unarchive)");
 }
 
 int run(Api &api, const std::vector<std::string> &args)

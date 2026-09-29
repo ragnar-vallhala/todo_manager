@@ -20,11 +20,11 @@ std::string checkName(const std::string &name)
 }
 }  // namespace
 
-// GET /api/categories
-void CategoryController::list(const HttpRequestPtr &, Callback &&cb)
+// GET /api/categories[?archived=1]
+void CategoryController::list(const HttpRequestPtr &req, Callback &&cb)
 {
     Json::Value arr(Json::arrayValue);
-    for (const auto &c : TodoStore::get().listCategories())
+    for (const auto &c : TodoStore::get().listCategories(http::wantsArchived(req)))
         arr.append(c.toJson());
     cb(json(arr));
 }
@@ -55,7 +55,7 @@ void CategoryController::create(const HttpRequestPtr &req, Callback &&cb)
     }
 }
 
-// PATCH /api/categories/{id}  {"name"?: "...", "parentId"?: id|null}
+// PATCH /api/categories/{id}  {"name"?: "...", "parentId"?: id|null, "archived"?: bool}
 void CategoryController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     auto body = req->getJsonObject();
@@ -64,6 +64,7 @@ void CategoryController::update(const HttpRequestPtr &req, Callback &&cb, int64_
 
     std::optional<std::string> name;
     std::optional<int64_t> parentId;
+    std::optional<bool> archived;
     if (body->isMember("name"))
     {
         if (!(*body)["name"].isString())
@@ -74,12 +75,18 @@ void CategoryController::update(const HttpRequestPtr &req, Callback &&cb, int64_
     }
     if (!http::parseRef(*body, "parentId", parentId))
         return cb(error(400, "parentId must be an id or null"));
-    if (!name && !parentId)
+    if (body->isMember("archived"))
+    {
+        if (!(*body)["archived"].isBool())
+            return cb(error(400, "archived must be a boolean"));
+        archived = (*body)["archived"].asBool();
+    }
+    if (!name && !parentId && !archived)
         return cb(error(400, "nothing to update"));
 
     try
     {
-        cb(json(TodoStore::get().updateCategory(id, name, parentId).toJson()));
+        cb(json(TodoStore::get().updateCategory(id, name, parentId, archived).toJson()));
     }
     catch (const StoreError &e)
     {

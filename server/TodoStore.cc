@@ -50,6 +50,7 @@ Json::Value Category::toJson() const
     v["name"] = name;
     v["parentId"] = idOrNull(parentId);
     v["createdAt"] = static_cast<Json::Int64>(createdAt);
+    v["archived"] = archived;
     return v;
 }
 
@@ -106,6 +107,7 @@ void TodoStore::load()
         c.name = v["name"].asString();
         c.parentId = v["parentId"].isNull() ? 0 : v["parentId"].asInt64();
         c.createdAt = v["createdAt"].asInt64();
+        c.archived = v["archived"].asBool();
         nextCategoryId_ = std::max(nextCategoryId_, c.id + 1);
         categories_.push_back(std::move(c));
     }
@@ -138,10 +140,16 @@ void TodoStore::save() const
 
 // ── Todos ──
 
-std::vector<Todo> TodoStore::list() const
+std::vector<Todo> TodoStore::list(bool includeArchived) const
 {
     std::lock_guard<std::mutex> lock(mu_);
-    return todos_;
+    if (includeArchived)
+        return todos_;
+    std::vector<Todo> out;
+    for (const auto &t : todos_)
+        if (!inArchive(t.categoryId))
+            out.push_back(t);
+    return out;
 }
 
 Todo TodoStore::add(const std::string &title, int64_t categoryId)
@@ -193,8 +201,8 @@ bool TodoStore::remove(int64_t id)
 size_t TodoStore::clearDone()
 {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = std::remove_if(todos_.begin(), todos_.end(), [](const Todo &t) {
-        return t.done;
+    auto it = std::remove_if(todos_.begin(), todos_.end(), [this](const Todo &t) {
+        return t.done && !inArchive(t.categoryId);
     });
     size_t n = std::distance(it, todos_.end());
     if (n > 0)
@@ -215,6 +223,19 @@ Category *TodoStore::findCategory(int64_t id)
     return nullptr;
 }
 
+const Category *TodoStore::findCategory(int64_t id) const
+{
+    return const_cast<TodoStore *>(this)->findCategory(id);
+}
+
+bool TodoStore::inArchive(int64_t id) const
+{
+    for (const Category *c = findCategory(id); c; c = findCategory(c->parentId))
+        if (c->archived)
+            return true;
+    return false;
+}
+
 void TodoStore::checkCategoryExists(int64_t id)
 {
     if (id != 0 && !findCategory(id))
@@ -226,13 +247,20 @@ void TodoStore::checkSiblingName(const std::string &name, int64_t parentId, int6
     const auto key = lower(name);
     for (const auto &c : categories_)
         if (c.parentId == parentId && c.id != selfId && lower(c.name) == key)
-            throw StoreError(409, "a category named \"" + name + "\" already exists there");
+            throw StoreError(409, "a category named \"" + name + "\" already exists there" +
+                                      (inArchive(c.id) ? " (archived)" : ""));
 }
 
-std::vector<Category> TodoStore::listCategories() const
+std::vector<Category> TodoStore::listCategories(bool includeArchived) const
 {
     std::lock_guard<std::mutex> lock(mu_);
-    return categories_;
+    if (includeArchived)
+        return categories_;
+    std::vector<Category> out;
+    for (const auto &c : categories_)
+        if (!inArchive(c.id))
+            out.push_back(c);
+    return out;
 }
 
 Category TodoStore::addCategory(const std::string &name, int64_t parentId)
@@ -248,7 +276,8 @@ Category TodoStore::addCategory(const std::string &name, int64_t parentId)
 
 Category TodoStore::updateCategory(int64_t id,
                                    const std::optional<std::string> &name,
-                                   std::optional<int64_t> parentId)
+                                   std::optional<int64_t> parentId,
+                                   std::optional<bool> archived)
 {
     std::lock_guard<std::mutex> lock(mu_);
     Category *cat = findCategory(id);
@@ -269,6 +298,8 @@ Category TodoStore::updateCategory(int64_t id,
     if (name)
         cat->name = *name;
     cat->parentId = newParent;
+    if (archived)
+        cat->archived = *archived;
     save();
     return *cat;
 }

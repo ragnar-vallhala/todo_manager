@@ -15,11 +15,13 @@ struct CategoryItem
     int64_t id{0};
     std::string name;
     int64_t parentId{0};  // 0 = top level
+    bool archived{false};  // set on this category itself, not inherited
 
     static CategoryItem fromJson(const Json::Value &v)
     {
         return {v["id"].asInt64(), v["name"].asString(),
-                v["parentId"].isNull() ? 0 : v["parentId"].asInt64()};
+                v["parentId"].isNull() ? 0 : v["parentId"].asInt64(),
+                v["archived"].asBool()};
     }
 };
 
@@ -82,11 +84,36 @@ class CategoryTree
         return false;
     }
 
+    // True if `id` or one of its ancestors is archived.
+    bool inArchive(int64_t id) const
+    {
+        for (const CategoryItem *c = find(id); c; c = find(c->parentId))
+            if (c->archived)
+                return true;
+        return false;
+    }
+
+    // The outermost archived categories: archived, with no archived ancestor.
+    // Sorted by path.
+    std::vector<const CategoryItem *> archiveRoots() const
+    {
+        std::vector<const CategoryItem *> out;
+        for (const auto &c : cats_)
+            if (c.archived && !inArchive(c.parentId))
+                out.push_back(&c);
+        std::sort(out.begin(), out.end(), [this](const auto *a, const auto *b) {
+            return lower(path(a->id)) < lower(path(b->id));
+        });
+        return out;
+    }
+
     // Everything below `root` in display order, with depth (0 = direct child).
-    std::vector<std::pair<const CategoryItem *, int>> flatten(int64_t root = 0) const
+    // With `skipArchived`, archived categories and their subtrees are left out.
+    std::vector<std::pair<const CategoryItem *, int>> flatten(int64_t root = 0,
+                                                              bool skipArchived = false) const
     {
         std::vector<std::pair<const CategoryItem *, int>> out;
-        walk(root, 0, out);
+        walk(root, 0, skipArchived, out);
         return out;
     }
 
@@ -135,13 +162,15 @@ class CategoryTree
     }
 
   private:
-    void walk(int64_t parent, int depth,
+    void walk(int64_t parent, int depth, bool skipArchived,
               std::vector<std::pair<const CategoryItem *, int>> &out) const
     {
         for (const auto *c : children(parent))
         {
+            if (skipArchived && c->archived)
+                continue;
             out.emplace_back(c, depth);
-            walk(c->id, depth + 1, out);
+            walk(c->id, depth + 1, skipArchived, out);
         }
     }
 

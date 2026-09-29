@@ -28,6 +28,9 @@ struct Category
     std::string name;
     int64_t parentId{0};
     int64_t createdAt{0};
+    // Archived categories, their subcategories and their todos are left out
+    // of listings unless asked for, and kept by "clear completed".
+    bool archived{false};
 
     Json::Value toJson() const;
 };
@@ -49,20 +52,24 @@ class TodoStore
     static void init(const std::string &path);
     static TodoStore &get();
 
-    std::vector<Todo> list() const;
+    // Without `includeArchived`, todos in archived categories are left out.
+    std::vector<Todo> list(bool includeArchived) const;
     Todo add(const std::string &title, int64_t categoryId);
     std::optional<Todo> update(int64_t id,
                                const std::optional<std::string> &title,
                                std::optional<bool> done,
                                std::optional<int64_t> categoryId);
     bool remove(int64_t id);
-    size_t clearDone();
+    size_t clearDone();  // keeps todos in archived categories
 
-    std::vector<Category> listCategories() const;
+    // Without `includeArchived`, archived categories (and everything below
+    // them) are left out.
+    std::vector<Category> listCategories(bool includeArchived) const;
     Category addCategory(const std::string &name, int64_t parentId);
     Category updateCategory(int64_t id,
                             const std::optional<std::string> &name,
-                            std::optional<int64_t> parentId);
+                            std::optional<int64_t> parentId,
+                            std::optional<bool> archived);
     // Deletes a category; its todos and subcategories move to its parent.
     void removeCategory(int64_t id);
 
@@ -72,6 +79,9 @@ class TodoStore
     void save() const;  // callers below must hold mu_
 
     Category *findCategory(int64_t id);
+    const Category *findCategory(int64_t id) const;
+    // True if category `id` or one of its ancestors is archived.
+    bool inArchive(int64_t id) const;
     void checkCategoryExists(int64_t id);
     void checkSiblingName(const std::string &name, int64_t parentId, int64_t selfId);
 
