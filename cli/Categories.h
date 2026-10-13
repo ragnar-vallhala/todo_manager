@@ -10,18 +10,163 @@
 #include <utility>
 #include <vector>
 
+// How a category's name and tags look. Colors are "#rrggbb" or "".
+struct CategoryStyle
+{
+    std::string fg, bg;
+    bool bold{false}, italic{false}, underline{false};
+
+    bool empty() const { return fg.empty() && bg.empty() && !bold && !italic && !underline; }
+
+    static CategoryStyle fromJson(const Json::Value &v)
+    {
+        CategoryStyle s;
+        if (!v.isObject())
+            return s;
+        s.fg = v["fg"].isString() ? v["fg"].asString() : "";
+        s.bg = v["bg"].isString() ? v["bg"].asString() : "";
+        s.bold = v["bold"].asBool();
+        s.italic = v["italic"].asBool();
+        s.underline = v["underline"].asBool();
+        return s;
+    }
+
+    Json::Value toJson() const
+    {
+        if (empty())
+            return Json::Value();
+        Json::Value v(Json::objectValue);
+        if (!fg.empty())
+            v["fg"] = fg;
+        if (!bg.empty())
+            v["bg"] = bg;
+        if (bold)
+            v["bold"] = true;
+        if (italic)
+            v["italic"] = true;
+        if (underline)
+            v["underline"] = true;
+        return v;
+    }
+
+    // Named colors offered by all the clients (the web UI has the same list).
+    static const std::vector<std::pair<const char *, const char *>> &palette()
+    {
+        static const std::vector<std::pair<const char *, const char *>> p = {
+            {"red", "#e5534b"},  {"orange", "#e08a3c"}, {"yellow", "#c9a227"},
+            {"green", "#57a65a"}, {"teal", "#2aa198"},  {"blue", "#4f7fe0"},
+            {"purple", "#9a6ce0"}, {"pink", "#d9579b"}, {"brown", "#a0724a"},
+            {"gray", "#8a8f98"},
+        };
+        return p;
+    }
+
+    // A palette name or "#rrggbb" to "#rrggbb"; nullopt if it's neither.
+    static std::optional<std::string> parseColor(std::string s)
+    {
+        for (auto &c : s)
+            if (c >= 'A' && c <= 'Z')
+                c = static_cast<char>(c - 'A' + 'a');
+        if (s == "grey")
+            s = "gray";
+        for (const auto &[name, hex] : palette())
+            if (s == name)
+                return std::string(hex);
+        if (s.size() == 7 && s[0] == '#' &&
+            s.find_first_not_of("0123456789abcdef", 1) == std::string::npos)
+            return s;
+        return std::nullopt;
+    }
+
+    // "#e5534b" back to "red" when it's in the palette.
+    static std::string colorName(const std::string &hex)
+    {
+        for (const auto &[name, h] : palette())
+            if (hex == h)
+                return name;
+        return hex;
+    }
+
+    // "fg=red bg=#202020 bold italic", or "none"; parse() reads this back.
+    std::string describe() const
+    {
+        std::string out;
+        auto add = [&](const std::string &s) { out += (out.empty() ? "" : " ") + s; };
+        if (!fg.empty())
+            add("fg=" + colorName(fg));
+        if (!bg.empty())
+            add("bg=" + colorName(bg));
+        if (bold)
+            add("bold");
+        if (italic)
+            add("italic");
+        if (underline)
+            add("underline");
+        return out.empty() ? "none" : out;
+    }
+
+    // Applies words like "fg=red", "bg=none", "bold", "no-italic" or "none"
+    // (clear everything) to this style. Returns an error message, or "".
+    std::string apply(const std::vector<std::string> &words)
+    {
+        for (const auto &w : words)
+        {
+            if (w == "none" || w == "plain")
+            {
+                *this = CategoryStyle();
+                continue;
+            }
+            const auto eq = w.find('=');
+            if (eq != std::string::npos)
+            {
+                const auto key = w.substr(0, eq), val = w.substr(eq + 1);
+                std::string *color = key == "fg" ? &fg : key == "bg" ? &bg : nullptr;
+                if (!color)
+                    return "unknown setting '" + key + "' (use fg= or bg=)";
+                if (val == "none" || val.empty())
+                {
+                    color->clear();
+                    continue;
+                }
+                auto hex = parseColor(val);
+                if (!hex)
+                    return "unknown color '" + val + "' (use #rrggbb or one of: " + paletteNames() + ")";
+                *color = *hex;
+                continue;
+            }
+            const bool off = w.rfind("no-", 0) == 0;
+            const auto flag = off ? w.substr(3) : w;
+            bool *b = flag == "bold" ? &bold : flag == "italic" ? &italic
+                    : flag == "underline" ? &underline : nullptr;
+            if (!b)
+                return "unknown style word '" + w + "' (try fg=red bg=blue bold italic underline none)";
+            *b = !off;
+        }
+        return "";
+    }
+
+    static std::string paletteNames()
+    {
+        std::string out;
+        for (const auto &[name, hex] : palette())
+            out += (out.empty() ? "" : ", ") + std::string(name);
+        return out;
+    }
+};
+
 struct CategoryItem
 {
     int64_t id{0};
     std::string name;
     int64_t parentId{0};  // 0 = top level
     bool archived{false};  // set on this category itself, not inherited
+    CategoryStyle style;   // set on this category itself
 
     static CategoryItem fromJson(const Json::Value &v)
     {
         return {v["id"].asInt64(), v["name"].asString(),
                 v["parentId"].isNull() ? 0 : v["parentId"].asInt64(),
-                v["archived"].asBool()};
+                v["archived"].asBool(), CategoryStyle::fromJson(v["style"])};
     }
 };
 
@@ -91,6 +236,15 @@ class CategoryTree
             if (c->archived)
                 return true;
         return false;
+    }
+
+    // How `id` looks: its own style, else the nearest ancestor's.
+    CategoryStyle styleOf(int64_t id) const
+    {
+        for (const CategoryItem *c = find(id); c; c = find(c->parentId))
+            if (!c->style.empty())
+                return c->style;
+        return {};
     }
 
     // The outermost archived categories: archived, with no archived ancestor.

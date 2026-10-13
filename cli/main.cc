@@ -1,6 +1,7 @@
 // todo - command line client for the todo server.
 // With no arguments on a terminal it opens the interactive TUI.
 #include "Api.h"
+#include "Keys.h"
 #include "Theme.h"
 #include "Tui.h"
 
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,57 @@ std::string c(const char *code, const std::string &s)
     return gColor ? std::string("\033[") + code + "m" + s + "\033[0m" : s;
 }
 
+// SGR codes (without the leading reset) for category `id`'s style, inherited
+// from its parents; "" when it has none or output isn't colored. A background
+// without a text color gets near-black or near-white text, whichever reads.
+std::string catSgr(const CategoryTree &tree, int64_t id)
+{
+    const auto st = tree.styleOf(id);
+    if (!gColor || st.empty())
+        return "";
+    auto rgb = [](long v, int base) {
+        return ";" + std::to_string(base) + ";2;" + std::to_string(v >> 16 & 255) + ";" +
+               std::to_string(v >> 8 & 255) + ";" + std::to_string(v & 255);
+    };
+    auto hex = [](const std::string &h) { return std::stol(h.substr(1), nullptr, 16); };
+    std::string code;
+    if (st.bold)
+        code += ";1";
+    if (st.italic)
+        code += ";3";
+    if (st.underline)
+        code += ";4";
+    if (!st.fg.empty())
+        code += rgb(hex(st.fg), 38);
+    if (!st.bg.empty())
+    {
+        const long v = hex(st.bg);
+        if (st.fg.empty())
+        {
+            const double lum = 0.299 * (v >> 16) + 0.587 * (v >> 8 & 255) + 0.114 * (v & 255);
+            code += rgb(lum < 128 ? 0xF4F4F0 : 0x1E2126, 38);
+        }
+        code += rgb(v, 48);
+    }
+    return code.substr(1);
+}
+
+// A category's name in its style (see `todo cat style`), else in `fallback`.
+// With `block`, a background runs to the end of the line.
+std::string catName(const CategoryTree &tree, int64_t id, const std::string &text,
+                    const char *fallback = "1;36", bool block = false)
+{
+    const auto st = tree.styleOf(id);
+    auto code = catSgr(tree, id);
+    if (code.empty())
+        return c(fallback, text);
+    if (st.fg.empty() && st.bg.empty())
+        code += ";36";
+    if (st.bg.empty())
+        return "\033[0;" + code + "m" + text + "\033[0m";
+    return "\033[0;" + code + "m" + (block ? text + "\033[K" : " " + text + " ") + "\033[0m";
+}
+
 void usage()
 {
     std::cout <<
@@ -31,15 +84,32 @@ With no command, opens the interactive UI (press ? inside for keys).
 
 Todos:
   ui                                  open the interactive UI
-  list, ls [all|pending|done] [-c CAT]  show todos, grouped by category
+  list, ls [all|pending|done|pruned] [-c CAT]
+                                      show todos, grouped by category
                                       (archived ones only with -c ARCHIVED_CAT)
-  add [-c CAT] <title...>             add a todo (to category CAT)
+  add [-c CAT] [-p PRI] [-d DUE] [-m TEXT] <title...>
+                                      add a todo (to category CAT), -m with
+                                      a description
   done <id...>                        mark todo(s) done
   undo <id...>                        mark todo(s) not done
   edit <id> <title...>                rename a todo
+  set <id...> [-p PRI] [-d DUE]       set or change priority / deadline
+  desc <id> [TEXT...|-|none]          show a todo's description, or set it
+                                      (- reads it from stdin, none clears it)
   mv <id...> <CAT>                    move todo(s) to CAT ("/" = no category)
-  rm <id...>                          delete todo(s)
-  clear                               delete all completed todos
+  rm <id...>                          delete todo(s); pN deletes a pruned one
+  prune [id...]                       move done todo(s) to the pruned list
+                                      (all done ones without ids), freeing
+                                      their ids; they become p1, p2...
+  clear                               same as prune with no ids
+  restore <pN...>                     bring pruned todo(s) back, as done
+  purge                               delete all pruned todos for good
+
+  PRI is high, medium, low (or h/m/l, 3/2/1), or none to clear it.
+  DUE is a date like 2026-10-31, today, tomorrow, +N (days), a weekday
+  (mon, friday: the next one), or none to clear it.
+  Lists put higher priority first, then the earliest deadline.
+  New todos take the lowest free id, so pruning keeps ids small.
 
 Categories (CAT is a path like work/robotics; case doesn't matter):
   cat [ls] [-a]                       show the category tree (-a: and archived)
@@ -51,9 +121,18 @@ Categories (CAT is a path like work/robotics; case doesn't matter):
   cat archive <CAT>                   hide a category, its subcategories and
                                       todos from lists; `clear` keeps them
   cat unarchive <CAT>                 bring an archived category back
+  cat style <CAT> [WORDS...]          show or change how CAT (and subcategories
+                                      without their own) look everywhere:
+                                      fg=COLOR bg=COLOR bold italic underline,
+                                      no-bold etc., fg=none, or none to reset.
+                                      COLOR is #rrggbb or red, orange, yellow,
+                                      green, teal, blue, purple, pink, brown, gray
 
 Server URL, first match wins: -s/--server URL, $TODO_SERVER, the first line
 of ~/.config/todo/server, else http://127.0.0.1:27183
+
+Keys (UI only): `todo keys` prints every action and its keys in the format of
+~/.config/todo/keys, where you can rebind them (e.g. resize_left = super+left).
 
 Themes (UI only): press T in the UI to pick one; the choice is saved to
 ~/.config/todo/theme ($TODO_THEME overrides it). Add your own as
@@ -90,11 +169,12 @@ std::string joinArgs(const std::vector<std::string> &v, size_t from)
     return s;
 }
 
-// Removes "-c VALUE" / "--category VALUE" from args and returns VALUE.
-std::optional<std::string> takeCategoryOpt(std::vector<std::string> &args)
+// Removes "SHORT VALUE" / "LONG VALUE" from args and returns VALUE.
+std::optional<std::string> takeOpt(std::vector<std::string> &args, const char *shortName,
+                                   const char *longName)
 {
     for (size_t i = 1; i < args.size(); ++i)
-        if ((args[i] == "-c" || args[i] == "--category") && i + 1 < args.size())
+        if ((args[i] == shortName || args[i] == longName) && i + 1 < args.size())
         {
             auto v = args[i + 1];
             args.erase(args.begin() + i, args.begin() + i + 2);
@@ -118,6 +198,12 @@ int64_t parseId(const std::string &s)
     throw UsageError("invalid id '" + s + "'");
 }
 
+// A pruned todo's id: "p3" (or just "3").
+int64_t parsePrunedId(const std::string &s)
+{
+    return parseId(!s.empty() && (s[0] == 'p' || s[0] == 'P') ? s.substr(1) : s);
+}
+
 int64_t resolveCategory(const CategoryTree &tree, const std::string &path)
 {
     auto id = tree.resolve(path);
@@ -131,50 +217,92 @@ std::string displayPath(const CategoryTree &tree, int64_t id)
     return id ? tree.path(id) : "Inbox";
 }
 
-void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0)
+// Reads -p / -d from args. Unset options give nullopt; "none" gives 0 / "".
+std::pair<std::optional<int>, std::optional<std::string>> takeExtras(std::vector<std::string> &args)
 {
-    auto id = std::to_string(t.id);
+    std::pair<std::optional<int>, std::optional<std::string>> out;
+    if (auto p = takeOpt(args, "-p", "--priority"))
+    {
+        out.first = todo::parsePriority(*p);
+        if (!out.first)
+            throw UsageError("priority must be high, medium, low or none (not '" + *p + "')");
+    }
+    if (auto d = takeOpt(args, "-d", "--due"))
+    {
+        out.second = todo::parseDeadline(*d);
+        if (!out.second)
+            throw UsageError("can't read deadline '" + *d +
+                             "' (try 2026-10-31, today, tomorrow, +3, fri or none)");
+    }
+    return out;
+}
+
+// `look` is catSgr() of the todo's category: the line is drawn in it, and a
+// background fills the line.
+void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0, const std::string &look = "")
+{
+    auto id = t.idLabel();
     if (id.size() < idWidth)
         id = std::string(idWidth - id.size(), ' ') + id;
-    std::cout << std::string(indent, ' ') << (t.done ? c("32", "[x]") : c("33", "[ ]"))
-              << " " << c("2", id) << "  " << (t.done ? c("2;9", t.title) : t.title) << "\n";
+    const std::string base = look.empty() ? "\033[0m" : "\033[0;" + look + "m";
+    // Like c(), but going back to the line's look afterwards.
+    auto part = [&](const char *code, const std::string &s) {
+        if (!gColor)
+            return s;
+        return "\033[0" + (look.empty() ? "" : ";" + look) + ";" + code + "m" + s + base;
+    };
+    std::cout << std::string(indent, ' ') << (gColor && !look.empty() ? base : "")
+              << (t.pruned() ? part("2", "[-]") : t.done ? part("32", "[x]") : part("33", "[ ]"))
+              << " " << part("2", id) << "  ";
+    if (t.priority)
+        std::cout << part(t.done ? "2" : t.priority == 3 ? "1;31" : t.priority == 2 ? "33" : "36",
+                          todo::priorityMarker(t.priority))
+                  << " ";
+    std::cout << (t.done ? part("2;9", t.title) : t.title);
+    if (!t.description.empty())
+        std::cout << " " << part("2", "≡");  // has a description: todo desc ID
+    if (!t.deadline.empty())
+        std::cout << "  " << part(t.done ? "2" : todo::overdue(t) ? "1;31" : todo::dueToday(t) ? "33" : "2",
+                                  "due " + todo::dueLabel(t.deadline));
+    std::cout << (gColor && !look.empty() ? "\033[K\033[0m" : "") << "\n";
 }
 
 // ── todos ──
 
 int cmdList(Api &api, std::vector<std::string> args)
 {
-    auto catPath = takeCategoryOpt(args);
+    auto catPath = takeOpt(args, "-c", "--category");
     const std::string status = args.size() > 1 ? args[1] : "all";
-    if (status != "all" && status != "pending" && status != "done")
-        throw UsageError("status must be all, pending or done");
+    if (status != "all" && status != "pending" && status != "done" && status != "pruned")
+        throw UsageError("status must be all, pending, done or pruned");
 
     auto tree = api.categories(true);
     const int64_t root = catPath ? resolveCategory(tree, *catPath) : 0;
     // Archived todos only show up when looking inside an archived category.
     const bool archived = tree.inArchive(root);
     std::vector<TodoItem> todos;
-    for (auto &t : api.list(status, true))
+    for (auto &t : status == "pruned" ? api.listPruned() : api.list(status, true))
         if ((!catPath || tree.isWithin(t.categoryId, root) || (root == 0 && t.categoryId == 0)) &&
             (archived || !tree.inArchive(t.categoryId)))
             todos.push_back(t);
 
     if (todos.empty())
     {
-        std::cout << c("2", "No todos.") << "\n";
+        std::cout << c("2", status == "pruned" ? "Nothing pruned." : "No todos.") << "\n";
         return 0;
     }
+    std::stable_sort(todos.begin(), todos.end(), todo::listOrder);
     size_t idWidth = 1, pending = 0;
     for (const auto &t : todos)
     {
-        idWidth = std::max(idWidth, std::to_string(t.id).size());
+        idWidth = std::max(idWidth, t.idLabel().size());
         pending += !t.done;
     }
 
     auto printGroup = [&](int64_t catId, int indent) {
         for (const auto &t : todos)
             if (t.categoryId == catId)
-                printTodo(t, indent, idWidth);
+                printTodo(t, indent, idWidth, catSgr(tree, catId));
     };
     auto anyWithin = [&](int64_t catId) {
         for (const auto &t : todos)
@@ -198,7 +326,7 @@ int cmdList(Api &api, std::vector<std::string> args)
         }
         else
         {
-            std::cout << c("1;36", tree.path(root)) << (archived ? c("2", "  (archived)") : "")
+            std::cout << catName(tree, root, tree.path(root), "1;36", true) << (archived ? c("2", "  (archived)") : "")
                       << "\n";
             printGroup(root, 2);
             base = 1;
@@ -208,9 +336,17 @@ int cmdList(Api &api, std::vector<std::string> args)
             if (!anyWithin(cat->id))
                 continue;
             const int indent = 2 * (depth + base);
-            std::cout << std::string(indent, ' ') << c("1;36", cat->name) << "\n";
+            std::cout << std::string(indent, ' ') << catName(tree, cat->id, cat->name, "1;36", true)
+                      << "\n";
             printGroup(cat->id, indent + 2);
         }
+    }
+    if (status == "pruned")
+    {
+        std::cout << c("2", std::to_string(todos.size()) +
+                                " pruned (todo restore pN brings one back, todo purge deletes them)")
+                  << "\n";
+        return 0;
     }
     std::cout << c("2", std::to_string(todos.size()) + " shown, " + std::to_string(pending) +
                             " pending")
@@ -220,9 +356,11 @@ int cmdList(Api &api, std::vector<std::string> args)
 
 int cmdAdd(Api &api, std::vector<std::string> args)
 {
-    auto catPath = takeCategoryOpt(args);
+    auto catPath = takeOpt(args, "-c", "--category");
+    auto [priority, deadline] = takeExtras(args);
+    auto description = takeOpt(args, "-m", "--desc");
     if (args.size() < 2)
-        throw UsageError("usage: todo add [-c CAT] <title...>");
+        throw UsageError("usage: todo add [-c CAT] [-p PRI] [-d DUE] [-m TEXT] <title...>");
     int64_t catId = 0;
     CategoryTree tree;
     if (catPath)
@@ -230,7 +368,8 @@ int cmdAdd(Api &api, std::vector<std::string> args)
         tree = api.categories();
         catId = resolveCategory(tree, *catPath);
     }
-    auto t = api.add(joinArgs(args, 1), catId);
+    auto t = api.add(joinArgs(args, 1), catId, priority.value_or(0), deadline.value_or(""),
+                     description.value_or(""));
     std::cout << "Added ";
     printTodo(t);
     if (catId)
@@ -267,16 +406,16 @@ int cmdCategoryTree(Api &api, bool showArchived)
                 n += exact ? t.categoryId == id : tree.isWithin(t.categoryId, id);
         return n;
     };
-    auto line = [&](int indent, const std::string &name, const char *style, size_t open) {
-        std::cout << std::string(indent, ' ') << c(style, name);
+    auto line = [&](int indent, int64_t id, const std::string &name, const char *style, size_t open) {
+        std::cout << std::string(indent, ' ') << (id ? catName(tree, id, name, style) : c(style, name));
         if (open)
             std::cout << c("2", "  " + std::to_string(open) + " open");
         std::cout << "\n";
     };
 
-    line(0, "Inbox", "1", openIn(0, true));
+    line(0, 0, "Inbox", "1", openIn(0, true));
     for (const auto &[cat, depth] : tree.flatten(0, true))
-        line(2 * depth, cat->name, "1;36", openIn(cat->id, false));
+        line(2 * depth, cat->id, cat->name, "1;36", openIn(cat->id, false));
     if (tree.empty())
         std::cout << c("2", "No categories yet. Create one with: todo cat add <name>") << "\n";
 
@@ -293,9 +432,9 @@ int cmdCategoryTree(Api &api, bool showArchived)
     std::cout << c("1", "Archived") << "\n";
     for (const auto *root : archived)
     {
-        line(2, tree.path(root->id), "2;36", openIn(root->id, false));
+        line(2, root->id, tree.path(root->id), "2;36", openIn(root->id, false));
         for (const auto &[cat, depth] : tree.flatten(root->id))
-            line(2 * depth + 4, cat->name, "2;36", openIn(cat->id, false));
+            line(2 * depth + 4, cat->id, cat->name, "2;36", openIn(cat->id, false));
     }
     return 0;
 }
@@ -384,6 +523,35 @@ int cmdCategory(Api &api, const std::vector<std::string> &args)
         return 0;
     }
 
+    if (sub == "style")
+    {
+        if (args.size() < 3)
+            throw UsageError("usage: todo cat style <CAT> [fg=COLOR] [bg=COLOR] [bold] [italic] "
+                             "[underline] [none]");
+        const int64_t id = resolveCategory(tree, args[2]);
+        if (id == 0)
+            throw UsageError("choose a category");
+        const auto *cat = tree.find(id);
+        if (args.size() == 3)
+        {
+            std::cout << catName(tree, id, tree.path(id)) << ": ";
+            if (!cat->style.empty())
+                std::cout << cat->style.describe() << "\n";
+            else if (!tree.styleOf(id).empty())
+                std::cout << tree.styleOf(id).describe() << " (from its parent)\n";
+            else
+                std::cout << "none\n";
+            return 0;
+        }
+        CategoryStyle style = cat->style;
+        if (auto err = style.apply({args.begin() + 3, args.end()}); !err.empty())
+            throw UsageError(err);
+        api.setCategoryStyle(id, style);
+        tree = api.categories(true);
+        std::cout << catName(tree, id, tree.path(id)) << ": " << style.describe() << "\n";
+        return 0;
+    }
+
     if (sub == "archive" || sub == "unarchive")
     {
         const bool archive = sub == "archive";
@@ -412,7 +580,7 @@ int cmdCategory(Api &api, const std::vector<std::string> &args)
     }
 
     throw UsageError("unknown `todo cat` command '" + sub +
-                     "' (try: ls, add, rename, mv, rm, archive, unarchive)");
+                     "' (try: ls, add, rename, mv, rm, archive, unarchive, style)");
 }
 
 int run(Api &api, const std::vector<std::string> &args)
@@ -437,6 +605,51 @@ int run(Api &api, const std::vector<std::string> &args)
         return 0;
     }
 
+    if (cmd == "desc" || cmd == "description" || cmd == "note")
+    {
+        if (args.size() < 2)
+            throw UsageError("usage: todo desc <id> [TEXT...|-|none]");
+        const auto id = parseId(args[1]);
+        if (args.size() == 2)  // show it
+        {
+            for (const auto &t : api.list("all", true))
+                if (t.id == id)
+                {
+                    printTodo(t);
+                    std::cout << (t.description.empty() ? c("2", "  (no description)")
+                                                         : t.description)
+                              << "\n";
+                    return 0;
+                }
+            throw UsageError("no todo #" + std::to_string(id));
+        }
+        std::string text = joinArgs(args, 2);
+        if (text == "none")
+            text.clear();
+        else if (text == "-")
+        {
+            std::ostringstream in;
+            in << std::cin.rdbuf();
+            text = in.str();
+        }
+        auto t = api.setDescription(id, text);
+        printTodo(t);
+        std::cout << c("2", t.description.empty() ? "  description cleared" : "  description saved")
+                  << "\n";
+        return 0;
+    }
+
+    if (cmd == "set")
+    {
+        auto rest = args;
+        auto [priority, deadline] = takeExtras(rest);
+        if (rest.size() < 2 || (!priority && !deadline))
+            throw UsageError("usage: todo set <id...> [-p PRI] [-d DUE]   (PRI/DUE \"none\" clears)");
+        for (size_t i = 1; i < rest.size(); ++i)
+            printTodo(api.setExtras(parseId(rest[i]), priority, deadline));
+        return 0;
+    }
+
     if (cmd == "edit")
     {
         if (args.size() < 3)
@@ -451,6 +664,13 @@ int run(Api &api, const std::vector<std::string> &args)
             throw UsageError("usage: todo rm <id...>");
         for (size_t i = 1; i < args.size(); ++i)
         {
+            if (args[i][0] == 'p' || args[i][0] == 'P')
+            {
+                const auto id = parsePrunedId(args[i]);
+                api.removePruned(id);
+                std::cout << "Deleted p" << id << " for good\n";
+                continue;
+            }
             auto id = parseId(args[i]);
             api.remove(id);
             std::cout << "Deleted " << id << "\n";
@@ -458,9 +678,40 @@ int run(Api &api, const std::vector<std::string> &args)
         return 0;
     }
 
-    if (cmd == "clear")
+    if (cmd == "prune" || cmd == "clear")
     {
-        std::cout << "Removed " << api.clearDone() << " completed todo(s)\n";
+        if (args.size() == 1)
+        {
+            const auto n = api.pruneDone();
+            std::cout << "Pruned " << n << " done todo(s)"
+                      << (n ? "; their ids are free again (see: todo ls pruned)" : "") << "\n";
+            return 0;
+        }
+        for (size_t i = 1; i < args.size(); ++i)
+        {
+            const auto id = parseId(args[i]);
+            const auto p = api.prune(id);
+            std::cout << "Pruned #" << id << " → " << p.idLabel() << "  " << c("2", p.title) << "\n";
+        }
+        return 0;
+    }
+
+    if (cmd == "restore" || cmd == "unprune")
+    {
+        if (args.size() < 2)
+            throw UsageError("usage: todo restore <pN...>   (see: todo ls pruned)");
+        for (size_t i = 1; i < args.size(); ++i)
+        {
+            const auto id = parsePrunedId(args[i]);
+            std::cout << "Restored p" << id << " as ";
+            printTodo(api.restore(id));
+        }
+        return 0;
+    }
+
+    if (cmd == "purge")
+    {
+        std::cout << "Deleted " << api.clearPruned() << " pruned todo(s) for good\n";
         return 0;
     }
 
@@ -499,6 +750,15 @@ int main(int argc, char *argv[])
     }
     if (args.empty())
         args.push_back("list");
+    if (args[0] == "keys")  // needs no server
+    {
+        std::vector<std::string> warnings;
+        auto keys = Keymap::load(warnings);
+        for (const auto &w : warnings)
+            std::cerr << c("33", "warning: ") << w << "\n";
+        std::cout << keys.dump();
+        return warnings.empty() ? 0 : 1;
+    }
 
     try
     {

@@ -8,6 +8,42 @@ using http::json;
 namespace
 {
 constexpr size_t kMaxTitle = 500;
+constexpr size_t kMaxDescription = 10000;
+
+// Reads optional "priority" ("low"|"medium"|"high"|null), "deadline"
+// ("YYYY-MM-DD"|null) and "description" (text|null) into `patch`; null
+// clears them. Returns an error message, or "" if they're fine.
+std::string parseExtras(const Json::Value &body, TodoPatch &patch)
+{
+    if (body.isMember("priority"))
+    {
+        const auto &v = body["priority"];
+        const int p = v.isNull() ? 0 : v.isString() ? parsePriority(v.asString()) : -1;
+        if (p < 0)
+            return "priority must be \"low\", \"medium\", \"high\" or null";
+        patch.priority = p;
+    }
+    if (body.isMember("deadline"))
+    {
+        const auto &v = body["deadline"];
+        if (!v.isNull() && !(v.isString() && isValidDate(v.asString())))
+            return "deadline must be a date like \"2026-10-31\", or null";
+        patch.deadline = v.isNull() ? "" : v.asString();
+    }
+    if (body.isMember("description"))
+    {
+        const auto &v = body["description"];
+        if (!v.isNull() && !v.isString())
+            return "description must be a string or null";
+        // Trailing blank lines and spaces don't count; all-blank clears it.
+        std::string d = v.isNull() ? "" : v.asString();
+        d.erase(d.find_last_not_of(" \t\r\n") + 1);
+        if (d.size() > kMaxDescription)
+            return "description must be at most 10000 characters";
+        patch.description = d;
+    }
+    return "";
+}
 }  // namespace
 
 // GET /api/todos[?status=all|pending|done][&archived=1]
@@ -24,7 +60,7 @@ void TodoController::list(const HttpRequestPtr &req, Callback &&cb)
     cb(json(arr));
 }
 
-// POST /api/todos  {"title": "...", "categoryId"?: id|null}
+// POST /api/todos  {"title": "...", "categoryId"?: id|null, "priority"?, "deadline"?, "description"?}
 void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
 {
     auto body = req->getJsonObject();
@@ -38,10 +74,18 @@ void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
     std::optional<int64_t> categoryId;
     if (!http::parseRef(*body, "categoryId", categoryId))
         return cb(error(400, "categoryId must be an id or null"));
+    TodoPatch extras;
+    if (auto msg = parseExtras(*body, extras); !msg.empty())
+        return cb(error(400, msg));
 
+    Todo init;
+    init.categoryId = categoryId.value_or(0);
+    init.priority = extras.priority.value_or(0);
+    init.deadline = extras.deadline.value_or("");
+    init.description = extras.description.value_or("");
     try
     {
-        cb(json(TodoStore::get().add(title, categoryId.value_or(0)).toJson(), k201Created));
+        cb(json(TodoStore::get().add(title, init).toJson(), k201Created));
     }
     catch (const StoreError &e)
     {
@@ -49,38 +93,40 @@ void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
     }
 }
 
-// PATCH /api/todos/{id}  {"title"?: "...", "done"?: bool, "categoryId"?: id|null}
+// PATCH /api/todos/{id}  {"title"?: "...", "done"?: bool, "categoryId"?: id|null,
+//                         "priority"?: "low"|"medium"|"high"|null, "deadline"?: "YYYY-MM-DD"|null,
+//                         "description"?: "..."|null}
 void TodoController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     auto body = req->getJsonObject();
     if (!body || !body->isObject())
         return cb(error(400, "body must be a JSON object"));
 
-    std::optional<std::string> title;
-    std::optional<bool> done;
-    std::optional<int64_t> categoryId;
+    TodoPatch patch;
     if (body->isMember("title"))
     {
         if (!(*body)["title"].isString())
             return cb(error(400, "title must be a string"));
-        title = http::trim((*body)["title"].asString());
-        if (title->empty() || title->size() > kMaxTitle)
+        patch.title = http::trim((*body)["title"].asString());
+        if (patch.title->empty() || patch.title->size() > kMaxTitle)
             return cb(error(400, "title must be 1-500 characters"));
     }
     if (body->isMember("done"))
     {
         if (!(*body)["done"].isBool())
             return cb(error(400, "done must be a boolean"));
-        done = (*body)["done"].asBool();
+        patch.done = (*body)["done"].asBool();
     }
-    if (!http::parseRef(*body, "categoryId", categoryId))
+    if (!http::parseRef(*body, "categoryId", patch.categoryId))
         return cb(error(400, "categoryId must be an id or null"));
-    if (!title && !done && !categoryId)
+    if (auto msg = parseExtras(*body, patch); !msg.empty())
+        return cb(error(400, msg));
+    if (patch.empty())
         return cb(error(400, "nothing to update"));
 
     try
     {
-        auto t = TodoStore::get().update(id, title, done, categoryId);
+        auto t = TodoStore::get().update(id, patch);
         if (!t)
             return cb(error(404, "todo not found"));
         cb(json(t->toJson()));
@@ -105,4 +151,65 @@ void TodoController::clearDone(const HttpRequestPtr &, Callback &&cb)
     Json::Value body;
     body["removed"] = static_cast<Json::UInt64>(TodoStore::get().clearDone());
     cb(json(body));
+}
+
+// ── Pruned ──
+
+// POST /api/todos/{id}/prune  -- a done todo; → the pruned todo (its new pN id)
+void TodoController::prune(const HttpRequestPtr &, Callback &&cb, int64_t id)
+{
+    try
+    {
+        cb(json(TodoStore::get().prune(id).toJson()));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+
+// POST /api/todos/prune  -- every done todo, except in archived categories
+void TodoController::pruneDone(const HttpRequestPtr &, Callback &&cb)
+{
+    Json::Value body;
+    body["pruned"] = static_cast<Json::UInt64>(TodoStore::get().pruneDone());
+    cb(json(body));
+}
+
+// GET /api/pruned
+void TodoController::listPruned(const HttpRequestPtr &, Callback &&cb)
+{
+    Json::Value arr(Json::arrayValue);
+    for (const auto &t : TodoStore::get().listPruned())
+        arr.append(t.toJson());
+    cb(json(arr));
+}
+
+// DELETE /api/pruned  -- deletes every pruned todo for good
+void TodoController::clearPruned(const HttpRequestPtr &, Callback &&cb)
+{
+    Json::Value body;
+    body["removed"] = static_cast<Json::UInt64>(TodoStore::get().clearPruned());
+    cb(json(body));
+}
+
+// POST /api/pruned/{id}/restore  -- → the todo, done, with a free id
+void TodoController::restore(const HttpRequestPtr &, Callback &&cb, int64_t id)
+{
+    try
+    {
+        cb(json(TodoStore::get().restore(id).toJson(), k201Created));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+
+// DELETE /api/pruned/{id}
+void TodoController::removePruned(const HttpRequestPtr &, Callback &&cb, int64_t id)
+{
+    if (!TodoStore::get().removePruned(id))
+        return cb(error(404, "pruned todo not found"));
+    cb(HttpResponse::newHttpResponse(k204NoContent, CT_NONE));
 }

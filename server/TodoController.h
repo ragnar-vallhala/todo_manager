@@ -13,6 +13,12 @@ class TodoController : public HttpController<TodoController>
     ADD_METHOD_TO(TodoController::clearDone, "/api/todos/done", Delete);
     ADD_METHOD_TO(TodoController::update, "/api/todos/{id}", Patch);
     ADD_METHOD_TO(TodoController::remove, "/api/todos/{id}", Delete);
+    ADD_METHOD_TO(TodoController::pruneDone, "/api/todos/prune", Post);
+    ADD_METHOD_TO(TodoController::prune, "/api/todos/{id}/prune", Post);
+    ADD_METHOD_TO(TodoController::listPruned, "/api/pruned", Get);
+    ADD_METHOD_TO(TodoController::clearPruned, "/api/pruned", Delete);
+    ADD_METHOD_TO(TodoController::restore, "/api/pruned/{id}/restore", Post);
+    ADD_METHOD_TO(TodoController::removePruned, "/api/pruned/{id}", Delete);
     METHOD_LIST_END
 
     using Callback = std::function<void(const HttpResponsePtr &)>;
@@ -22,4 +28,10 @@ class TodoController : public HttpController<TodoController>
     void update(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void remove(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void clearDone(const HttpRequestPtr &req, Callback &&cb);
+    void prune(const HttpRequestPtr &req, Callback &&cb, int64_t id);
+    void pruneDone(const HttpRequestPtr &req, Callback &&cb);
+    void listPruned(const HttpRequestPtr &req, Callback &&cb);
+    void clearPruned(const HttpRequestPtr &req, Callback &&cb);
+    void restore(const HttpRequestPtr &req, Callback &&cb, int64_t id);
+    void removePruned(const HttpRequestPtr &req, Callback &&cb, int64_t id);
 };

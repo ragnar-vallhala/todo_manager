@@ -8,9 +8,11 @@ const tpl = $('#item-tpl');
 const ALL = 'all';
 const INBOX = 'inbox';
 const ARCHIVE = 'archive';  // every archived category
+const PRUNED = 'pruned';    // done todos moved aside to free their ids
 
 let todos = [];
 let cats = [];
+let pruned = [];  // their ids are separate from todos' (p1, p2...)
 let view = ALL;           // ALL, INBOX, ARCHIVE, or a category id
 let seen = null;          // ids already on screen, so only new rows animate in
 let showDone = false;
@@ -71,7 +73,8 @@ async function run(fn) {
 // Everything, archived included; views filter it (see inView).
 async function fetchAll() {
   const first = !cats.length;
-  [todos, cats] = await Promise.all([api('GET', '/todos?archived=1'), api('GET', '/categories?archived=1')]);
+  [todos, cats, pruned] = await Promise.all([
+    api('GET', '/todos?archived=1'), api('GET', '/categories?archived=1'), api('GET', '/pruned')]);
   if (first) revealArchive();  // opened on an archived category's link
 }
 
@@ -96,6 +99,40 @@ const pathName = (id, from = null) => {
 function isWithin(id, ancestor) {
   for (let c = findCat(id); c; c = findCat(c.parentId)) if (c.id === ancestor) return true;
   return false;
+}
+
+// How category `id` looks: its own style, else the nearest ancestor's.
+function styleOf(id) {
+  for (let c = findCat(id); c; c = findCat(c.parentId)) if (c.style) return c.style;
+  return null;
+}
+
+// Gives `node` category `id`'s colors and font style. As a `block` (a todo
+// row, a sidebar item, a heading) a background fills the whole thing and its
+// secondary colors are adjusted to suit; otherwise it's a small label.
+const paintCat = (node, id, block = false) => paintStyle(node, styleOf(id), block);
+
+function paintStyle(node, st, block = false) {
+  if (!st) return node;
+  // A background without a text color gets whichever reads better on it.
+  const text = st.fg || (st.bg && (isDark(st.bg) ? '#f4f4f0' : '#1e2126'));
+  if (text) {
+    node.style.color = text;
+    node.style.setProperty('--category', text);
+  }
+  if (st.bg) {
+    node.style.background = st.bg;
+    node.classList.add(block ? 'cat-block' : 'cat-chip');
+    if (block) {
+      node.style.setProperty('--text', text);
+      node.style.setProperty('--muted', mix(text, st.bg, 72));
+      node.style.setProperty('--faint', mix(text, st.bg, 45));
+    }
+  }
+  if (st.bold) node.style.fontWeight = '600';
+  if (st.italic) node.style.fontStyle = 'italic';
+  if (st.underline) node.style.textDecoration = 'underline';
+  return node;
 }
 
 // True if category `id` or one of its ancestors is archived.
@@ -130,6 +167,41 @@ function inView(todo, v = view) {
 }
 
 const openIn = (v) => todos.filter((t) => !t.done && inView(t, v)).length;
+
+// ── Priority and deadline ──
+
+const PRIORITY = { high: 3, medium: 2, low: 1 };
+const MARKS = { high: '!!!', medium: '!!', low: '!' };
+
+// Local dates as "YYYY-MM-DD", and day numbers for comparing them.
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const dayNum = (iso) => { const [y, m, d] = iso.split('-').map(Number); return Date.UTC(y, m - 1, d) / 864e5; };
+const todayNum = () => dayNum(isoDate(new Date()));
+const addDays = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return isoDate(d); };
+
+// Short and relative when near: today, tomorrow, Fri, 3d ago, Oct 5.
+function dueLabel(iso) {
+  const diff = dayNum(iso) - todayNum();
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'tomorrow';
+  if (diff === -1) return 'yesterday';
+  if (diff < 0) return `${-diff}d ago`;
+  const date = new Date(iso + 'T12:00');
+  if (diff < 7) return date.toLocaleDateString(undefined, { weekday: 'short' });
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: sameYear ? undefined : 'numeric' });
+}
+
+// Higher priority first, then earlier deadline (none last), then oldest first.
+function listOrder(a, b) {
+  const p = (PRIORITY[b.priority] || 0) - (PRIORITY[a.priority] || 0);
+  if (p) return p;
+  if (a.deadline !== b.deadline) {
+    if (!a.deadline || !b.deadline) return a.deadline ? -1 : 1;
+    return a.deadline < b.deadline ? -1 : 1;
+  }
+  return a.id - b.id;
+}
 const viewTarget = () => (typeof view === 'number' ? view : null);
 
 // ── Routing: #/inbox, #/archived, #/c/12 ──
@@ -138,12 +210,13 @@ function readHash() {
   const h = location.hash;
   if (h === '#/inbox') return INBOX;
   if (h === '#/archived') return ARCHIVE;
+  if (h === '#/pruned') return PRUNED;
   const m = h.match(/^#\/c\/(\d+)$/);
   return m ? Number(m[1]) : ALL;
 }
 
 function go(v) {
-  const hash = v === ALL ? '#/' : v === INBOX ? '#/inbox' : v === ARCHIVE ? '#/archived' : `#/c/${v}`;
+  const hash = v === ALL ? '#/' : v === INBOX ? '#/inbox' : v === ARCHIVE ? '#/archived' : v === PRUNED ? '#/pruned' : `#/c/${v}`;
   if (location.hash !== hash) history.pushState(null, '', hash);
   view = v;
   revealArchive();
@@ -200,11 +273,12 @@ function navRow(v, name, { depth = 0, fold = null } = {}) {
     row.append(el('span', { className: 'fold-spacer' }));
   }
 
-  const n = openIn(v);
+  const n = v === PRUNED ? pruned.length : openIn(v);
   const item = el('button', { className: 'nav-item' },
     el('span', { className: 'nav-name', textContent: name }),
     el('span', { className: 'nav-count', textContent: n || '' }));
   if (v === view) item.setAttribute('aria-current', 'page');
+  if (typeof v === 'number') paintCat(item, v, true);
   item.addEventListener('click', () => go(v));
   row.append(item);
 
@@ -250,6 +324,7 @@ function renderSidebar() {
       }
     }
   }
+  if (pruned.length || view === PRUNED) rows.push(navRow(PRUNED, 'Pruned'));
   $('#nav-archive').replaceChildren(...rows);
 }
 
@@ -259,16 +334,17 @@ function renderHeader() {
     crumbs.replaceChildren(el('span', {
       textContent: new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
     }));
-  } else if (view === INBOX || view === ARCHIVE) {
-    crumbs.replaceChildren(el('span', { className: 'here', textContent: view === INBOX ? 'Inbox' : 'Archived' }));
+  } else if (view === INBOX || view === ARCHIVE || view === PRUNED) {
+    const label = { [INBOX]: 'Inbox', [ARCHIVE]: 'Archived', [PRUNED]: 'Pruned' }[view];
+    crumbs.replaceChildren(el('span', { className: 'here', textContent: label }));
   } else {
     const parts = pathOf(view);
     const nodes = [];
     parts.forEach((c, i) => {
       if (i) nodes.push(el('span', { className: 'sep', textContent: '/', ariaHidden: 'true' }));
-      if (i === parts.length - 1) nodes.push(el('span', { className: 'here', textContent: c.name }));
+      if (i === parts.length - 1) nodes.push(paintCat(el('span', { className: 'here', textContent: c.name }), c.id));
       else {
-        const b = el('button', { textContent: c.name });
+        const b = paintCat(el('button', { textContent: c.name }), c.id);
         b.addEventListener('click', () => go(c.id));
         nodes.push(b);
       }
@@ -282,7 +358,7 @@ function renderHeader() {
   $('#cat-menu-btn').hidden = typeof view !== 'number';
   const cat = findCat(view);
   $('#new-title').placeholder = cat ? `Add to ${cat.name}` : "What's next?";
-  $('#add-form').hidden = view === ARCHIVE;
+  $('#add-form').hidden = view === ARCHIVE || view === PRUNED;
   $('#clear-done').hidden = viewArchived();  // the server keeps archived todos anyway
 
   // Only the archived category itself can be unarchived, not one inside it.
@@ -292,8 +368,9 @@ function renderHeader() {
 }
 
 function renderTodos() {
+  if (view === PRUNED) return renderPruned();
   const inThisView = todos.filter((t) => inView(t));
-  const open = inThisView.filter((t) => !t.done);
+  const open = inThisView.filter((t) => !t.done).sort(listOrder);
   const done = inThisView.filter((t) => t.done).reverse();
 
   // Group open todos: the viewed category's own todos first, then one group
@@ -320,7 +397,9 @@ function renderTodos() {
     if (g.title) {
       const link = el('button', { textContent: g.title });
       link.addEventListener('click', () => go(g.id));
-      section.append(el('h2', { className: 'group-title' }, link));
+      const heading = paintCat(el('h2', { className: 'group-title' }, link), g.id, true);
+      if (styleOf(g.id)) link.style.color = 'inherit';
+      section.append(heading);
     }
     section.append(el('ul', { className: 'list' }, ...g.todos.map((t) => renderItem(t, false))));
     return section;
@@ -342,6 +421,53 @@ function renderTodos() {
   $('#done-list').replaceChildren(...done.map((t) => renderItem(t, true)));
 }
 
+// Pruned todos, newest first: restore one (as done, with a free id) or delete
+// it for good.
+function renderPruned() {
+  const list = pruned.slice().sort((a, b) => b.prunedAt - a.prunedAt || b.id - a.id);
+  const rows = list.map((p) => {
+    const li = tpl.content.firstElementChild.cloneNode(true);
+    li.draggable = false;
+    for (const sel of ['.plan', '.move', '.prune']) $(sel, li).remove();
+    const check = $('.check', li);
+    check.setAttribute('aria-checked', 'true');
+    check.setAttribute('aria-label', `Restore "${p.title}"`);
+    check.title = 'Restore (as done)';
+    check.addEventListener('click', () => run(async () => {
+      await api('POST', `/pruned/${p.id}/restore`);
+      await fetchAll();
+    }));
+    $('.title', li).textContent = p.title;
+    if (p.categoryId != null) $('.tag', li).textContent = pathName(p.categoryId);
+    $('.due', li).textContent = 'pruned ' + new Date(p.prunedAt * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const del = $('.delete', li);
+    del.setAttribute('aria-label', 'Delete for good');
+    del.title = 'Delete for good';
+    del.addEventListener('click', () => run(async () => {
+      await api('DELETE', `/pruned/${p.id}`);
+      pruned = pruned.filter((x) => x.id !== p.id);
+    }));
+    paintCat(li, p.categoryId, true);
+    return li;
+  });
+
+  const bar = [];
+  if (list.length) {
+    const purge = el('button', { className: 'quiet', textContent: 'Delete all for good' });
+    purge.addEventListener('click', async () => {
+      const ok = await confirmDialog('Delete all pruned todos?', `${list.length} todo(s) will be gone for good.`, 'Delete all');
+      if (ok) run(async () => { await api('DELETE', '/pruned'); pruned = []; });
+    });
+    bar.push(el('div', { className: 'done-bar pruned-bar' },
+      el('span', { textContent: 'Click a check to restore a todo (as done).' }), purge));
+  }
+  $('#open-groups').replaceChildren(...bar, el('ul', { className: 'list pruned-list' }, ...rows));
+  const empty = $('#empty');
+  empty.hidden = list.length > 0;
+  empty.textContent = 'Nothing pruned. Pruning a done todo moves it here and gives its number to the next new todo.';
+  $('#done-section').hidden = true;
+}
+
 function renderItem(todo, showTag) {
   const li = tpl.content.firstElementChild.cloneNode(true);
   if (seen && !seen.has(todo.id)) li.classList.add('new');
@@ -355,11 +481,41 @@ function renderItem(todo, showTag) {
 
   const title = $('.title', li);
   title.textContent = todo.title;
+  if (todo.description) {
+    const desc = $('.desc', li);
+    desc.textContent = todo.description;
+    desc.hidden = false;
+    desc.title = 'Click to show all / less';
+    desc.addEventListener('click', () => desc.classList.toggle('open'));
+  }
   title.title = 'Added ' + new Date(todo.createdAt * 1000).toLocaleString();
   title.addEventListener('dblclick', () => startEdit(title, todo));
   title.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') startEdit(title, todo);
   });
+
+  if (todo.priority) {
+    const prio = $('.prio', li);
+    prio.textContent = MARKS[todo.priority];
+    prio.dataset.p = todo.priority;
+    prio.title = `${todo.priority[0].toUpperCase()}${todo.priority.slice(1)} priority`;
+  }
+  if (todo.deadline) {
+    const due = $('.due', li);
+    const diff = dayNum(todo.deadline) - todayNum();
+    due.textContent = dueLabel(todo.deadline);
+    due.title = 'Due ' + new Date(todo.deadline + 'T12:00').toLocaleDateString(undefined, { dateStyle: 'full' });
+    if (!todo.done && diff < 0) due.classList.add('overdue');
+    if (!todo.done && diff === 0) due.classList.add('today');
+  }
+  $('.plan', li).addEventListener('click', () => planTodo(todo));
+  const prune = $('.prune', li);
+  prune.hidden = !todo.done;
+  prune.addEventListener('click', () => run(async () => {
+    await api('POST', `/todos/${todo.id}/prune`);
+    await fetchAll();
+  }));
+  paintCat(li, todo.categoryId, true);  // todos look like their category
 
   // Done todos are listed flat, so say where each one lives.
   if (showTag && todo.categoryId != null && todo.categoryId !== view) {
@@ -410,6 +566,7 @@ function startEdit(title, todo) {
 let dragging = null;  // { kind: 'todo' | 'cat', id }
 
 function canDrop(v) {
+  if (v === PRUNED) return false;
   // Dropping a category on Archived archives it.
   if (v === ARCHIVE) return dragging.kind === 'cat' && !inArchive(dragging.id);
   if (dragging.kind === 'todo') return v !== ALL;
@@ -513,6 +670,140 @@ async function moveTodo(todo) {
   });
 }
 
+// Description, priority buttons and a date field; saves only what changed.
+async function planTodo(todo) {
+  let priority = todo.priority ?? null;
+  const result = await openDialog((close) => {
+    const seg = el('div', { className: 'segmented', role: 'group' });
+    seg.setAttribute('aria-label', 'Priority');
+    const choices = [[null, 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
+    const buttons = choices.map(([value, label]) => {
+      const b = el('button', { type: 'button', textContent: label });
+      b.addEventListener('click', () => {
+        priority = value;
+        buttons.forEach((x, i) => x.setAttribute('aria-pressed', String(choices[i][0] === priority)));
+      });
+      b.setAttribute('aria-pressed', String(value === priority));
+      return b;
+    });
+    seg.append(...buttons);
+
+    const date = el('input', { type: 'date', value: todo.deadline ?? '' });
+    date.setAttribute('aria-label', 'Deadline');
+    const quick = (label, days) => {
+      const b = el('button', { type: 'button', className: 'quiet', textContent: label });
+      b.addEventListener('click', () => { date.value = days == null ? '' : addDays(days); });
+      return b;
+    };
+    const desc = el('textarea', { value: todo.description ?? '', maxLength: 10000, placeholder: 'Notes, links, steps… (optional)' });
+    desc.setAttribute('aria-label', 'Description');
+    // Ctrl/Cmd+Enter saves from the text box (Enter alone is a new line).
+    desc.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); }
+    });
+    const form = el('form', {},
+      el('p', { className: 'field-label', textContent: 'Description' }), desc,
+      el('p', { className: 'field-label', textContent: 'Priority' }), seg,
+      el('p', { className: 'field-label', textContent: 'Deadline' }),
+      el('div', { className: 'date-row' }, date, quick('Today', 0), quick('Tomorrow', 1), quick('Clear', null)),
+      actions(close, 'Save'));
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      close({ priority, deadline: date.value || null, description: desc.value.trimEnd() || null });
+    });
+    setTimeout(() => ($('[aria-pressed="true"]', seg) || buttons[0]).focus());
+    return [el('h2', { textContent: todo.title }), form];
+  });
+  if (!result) return;
+  const patch = {};
+  if (result.priority !== (todo.priority ?? null)) patch.priority = result.priority;
+  if (result.deadline !== (todo.deadline ?? null)) patch.deadline = result.deadline;
+  if (result.description !== (todo.description ?? null)) patch.description = result.description;
+  if (!Object.keys(patch).length) return;
+  run(async () => {
+    Object.assign(todo, await api('PATCH', `/todos/${todo.id}`, patch));
+  });
+}
+
+// Named colors, the same list the CLI and terminal UI accept.
+const PALETTE = {
+  red: '#e5534b', orange: '#e08a3c', yellow: '#c9a227', green: '#57a65a', teal: '#2aa198',
+  blue: '#4f7fe0', purple: '#9a6ce0', pink: '#d9579b', brown: '#a0724a', gray: '#8a8f98',
+};
+
+// Colors and font style for a category's name and tags, with a live preview.
+async function styleCategory(cat) {
+  const st = { fg: null, bg: null, bold: false, italic: false, underline: false, ...(cat.style || {}) };
+  const inherited = !cat.style && styleOf(cat.parentId);
+  const result = await openDialog((close) => {
+    const preview = el('span', { className: 'style-preview', textContent: cat.name });
+    const update = () => {
+      preview.removeAttribute('style');
+      preview.classList.remove('cat-chip');
+      // With nothing set, it looks like its parent.
+      paintStyle(preview, Object.values(st).some(Boolean) ? st : styleOf(cat.parentId));
+    };
+
+    const colorRow = (key) => {
+      const row = el('div', { className: 'swatch-row', role: 'group' });
+      const custom = el('input', { type: 'color', value: st[key] || '#888888', title: 'Custom color' });
+      const buttons = [];
+      const mark = () => {
+        for (const b of buttons) b.setAttribute('aria-pressed', String((b.dataset.color || null) === st[key]));
+        custom.classList.toggle('picked', !!st[key] && !Object.values(PALETTE).includes(st[key]));
+      };
+      const pick = (color) => { st[key] = color; mark(); update(); };
+      const none = el('button', { type: 'button', className: 'swatch none', title: 'None' });
+      none.addEventListener('click', () => pick(null));
+      buttons.push(none);
+      for (const [name, hex] of Object.entries(PALETTE)) {
+        const b = el('button', { type: 'button', className: 'swatch', title: name });
+        b.dataset.color = hex;
+        b.style.background = hex;
+        b.addEventListener('click', () => pick(hex));
+        buttons.push(b);
+      }
+      custom.addEventListener('input', () => pick(custom.value));
+      row.append(...buttons, custom);
+      mark();
+      return row;
+    };
+
+    const toggles = el('div', { className: 'segmented' });
+    for (const [key, label, css] of [['bold', 'Bold', 'font-weight:600'], ['italic', 'Italic', 'font-style:italic'], ['underline', 'Underline', 'text-decoration:underline']]) {
+      const b = el('button', { type: 'button', textContent: label, style: css });
+      b.setAttribute('aria-pressed', String(!!st[key]));
+      b.addEventListener('click', () => {
+        st[key] = !st[key];
+        b.setAttribute('aria-pressed', String(st[key]));
+        update();
+      });
+      toggles.append(b);
+    }
+
+    const clear = el('button', { type: 'button', className: 'quiet', textContent: 'Reset' });
+    clear.addEventListener('click', () => close({ reset: true }));
+    const acts = actions(close, 'Save');
+    acts.prepend(clear);
+    acts.style.justifyContent = 'flex-end';
+    const form = el('form', {},
+      el('p', { className: 'field-label', textContent: 'Text color' }), colorRow('fg'),
+      el('p', { className: 'field-label', textContent: 'Background' }), colorRow('bg'),
+      el('p', { className: 'field-label', textContent: 'Font' }), toggles,
+      acts);
+    form.addEventListener('submit', (e) => { e.preventDefault(); close({ style: st }); });
+    update();
+    const hint = inherited ? el('p', { className: 'small', textContent: 'Now uses its parent\'s style. Setting one here overrides it.' }) : '';
+    return [el('h2', {}, 'Style for ', preview), hint, form];
+  });
+  if (!result) return;
+  const style = result.reset ? null : Object.fromEntries(Object.entries(result.style).filter(([, v]) => v));
+  run(async () => {
+    await api('PATCH', `/categories/${cat.id}`, { style: style && Object.keys(style).length ? style : null });
+    await fetchAll();
+  });
+}
+
 async function newCategory(parentId) {
   const parent = findCat(parentId);
   await promptName(parent ? `New category in ${parent.name}` : 'New category', '', 'Create', async (name) => {
@@ -540,6 +831,7 @@ const THEME_VARS = {
   error: '--danger',
   category: '--category',
   done: '--done',
+  pending: '--warn',
 };
 let themeName = 'default';
 try { themeName = localStorage.getItem('theme') || 'default'; } catch {}
@@ -665,6 +957,7 @@ menu.addEventListener('click', async (e) => {
   if (!action || !cat) return;
 
   if (action === 'add-sub') return newCategory(cat.id);
+  if (action === 'style') return styleCategory(cat);
 
   if (action === 'rename') {
     await promptName(`Rename ${cat.name}`, cat.name, 'Rename', async (name) => {
@@ -737,9 +1030,9 @@ $('#done-toggle').addEventListener('click', () => {
   render();
 });
 
-// The server keeps completed todos in archived categories, so reload.
+// Prunes every done todo (the server keeps those in archived categories).
 $('#clear-done').addEventListener('click', () => run(async () => {
-  await api('DELETE', '/todos/done');
+  await api('POST', '/todos/prune');
   await fetchAll();
 }));
 

@@ -2,10 +2,12 @@
 #pragma once
 
 #include "Categories.h"
+#include "TodoItem.h"
 
 #include <drogon/HttpClient.h>
 #include <trantor/net/EventLoopThread.h>
 
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -17,22 +19,6 @@ struct ApiError : std::runtime_error
     {
     }
     bool offline;  // true if the server could not be reached at all
-};
-
-struct TodoItem
-{
-    int64_t id{0};
-    std::string title;
-    bool done{false};
-    int64_t createdAt{0};
-    int64_t categoryId{0};  // 0 = no category (Inbox)
-
-    static TodoItem fromJson(const Json::Value &v)
-    {
-        return {v["id"].asInt64(), v["title"].asString(), v["done"].asBool(),
-                v["createdAt"].asInt64(),
-                v["categoryId"].isNull() ? 0 : v["categoryId"].asInt64()};
-    }
 };
 
 class Api
@@ -59,11 +45,19 @@ class Api
         return out;
     }
 
-    TodoItem add(const std::string &title, int64_t categoryId = 0)
+    // `priority` 0, `deadline` "" and `description` "" mean none.
+    TodoItem add(const std::string &title, int64_t categoryId = 0, int priority = 0,
+                 const std::string &deadline = "", const std::string &description = "")
     {
         Json::Value body;
         body["title"] = title;
         body["categoryId"] = ref(categoryId);
+        if (priority)
+            body["priority"] = todo::priorityName(priority);
+        if (!deadline.empty())
+            body["deadline"] = deadline;
+        if (!description.empty())
+            body["description"] = description;
         return TodoItem::fromJson(send(drogon::Post, "/api/todos", &body));
     }
 
@@ -88,12 +82,58 @@ class Api
         return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
     }
 
+    // Sets whichever is given; priority 0 / deadline "" clear them.
+    // "" clears it.
+    TodoItem setDescription(int64_t id, const std::string &description)
+    {
+        Json::Value body;
+        body["description"] = description.empty() ? Json::Value() : Json::Value(description);
+        return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
+    }
+
+    TodoItem setExtras(int64_t id, std::optional<int> priority,
+                       const std::optional<std::string> &deadline)
+    {
+        Json::Value body;
+        if (priority)
+            body["priority"] = *priority ? Json::Value(todo::priorityName(*priority)) : Json::Value();
+        if (deadline)
+            body["deadline"] = deadline->empty() ? Json::Value() : Json::Value(*deadline);
+        return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
+    }
+
     void remove(int64_t id) { send(drogon::Delete, path(id)); }
 
-    uint64_t clearDone()
+    // Pruning moves done todos to the pruned list (ids p1, p2...), freeing
+    // their ids for new todos.
+    TodoItem prune(int64_t id)
     {
-        return send(drogon::Delete, "/api/todos/done")["removed"].asUInt64();
+        return TodoItem::fromJson(send(drogon::Post, path(id) + "/prune"));
     }
+
+    uint64_t pruneDone() { return send(drogon::Post, "/api/todos/prune")["pruned"].asUInt64(); }
+
+    std::vector<TodoItem> listPruned()
+    {
+        std::vector<TodoItem> out;
+        for (const auto &v : send(drogon::Get, "/api/pruned"))
+            out.push_back(TodoItem::fromJson(v));
+        return out;
+    }
+
+    // Back as a done todo, with a free id.
+    TodoItem restore(int64_t prunedId)
+    {
+        return TodoItem::fromJson(
+            send(drogon::Post, "/api/pruned/" + std::to_string(prunedId) + "/restore"));
+    }
+
+    void removePruned(int64_t prunedId)
+    {
+        send(drogon::Delete, "/api/pruned/" + std::to_string(prunedId));
+    }
+
+    uint64_t clearPruned() { return send(drogon::Delete, "/api/pruned")["removed"].asUInt64(); }
 
     // With `archived`, archived categories are included (see CategoryTree::inArchive).
     CategoryTree categories(bool archived = false)
@@ -131,6 +171,14 @@ class Api
     {
         Json::Value body;
         body["archived"] = archived;
+        return CategoryItem::fromJson(send(drogon::Patch, catPath(id), &body));
+    }
+
+    // An empty style clears it, so the category looks like its parent.
+    CategoryItem setCategoryStyle(int64_t id, const CategoryStyle &style)
+    {
+        Json::Value body;
+        body["style"] = style.toJson();
         return CategoryItem::fromJson(send(drogon::Patch, catPath(id), &body));
     }
 
