@@ -47,7 +47,7 @@ many lines as you like. The web UI shows a few lines of it under the title
 (click for the rest) and the interactive UI shows it in the details panel; todos
 with one get a `≡` in the terminal.
 
-A todo can also have A todo can have a priority (high `!!!`, medium `!!`, low `!`)
+A todo can also have a priority (high `!!!`, medium `!!`, low `!`)
 and a deadline (a date). Lists put higher priority first, then the earliest
 deadline, then the oldest; todos with neither keep their usual order. Deadlines
 show as `today`, `tomorrow`, a weekday, or a date, in red once they've passed.

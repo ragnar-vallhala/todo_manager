@@ -82,7 +82,6 @@ class Api
         return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
     }
 
-    // Sets whichever is given; priority 0 / deadline "" clear them.
     // "" clears it.
     TodoItem setDescription(int64_t id, const std::string &description)
     {
@@ -91,6 +90,7 @@ class Api
         return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
     }
 
+    // Sets whichever is given; priority 0 / deadline "" clear them.
     TodoItem setExtras(int64_t id, std::optional<int> priority,
                        const std::optional<std::string> &deadline)
     {
