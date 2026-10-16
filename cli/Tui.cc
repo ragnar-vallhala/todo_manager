@@ -334,8 +334,10 @@ volatile sig_atomic_t gResized = 0;
 
 // "\033[>1u" asks terminals that support it to report keys unambiguously (the
 // kitty protocol), so Shift+Enter is told apart from Enter; others ignore it.
-constexpr char kEnterScreen[] = "\033[?1049h\033[?25l\033[?7l\033[>1u";
-constexpr char kLeaveScreen[] = "\033[<u\033[0m\033[?7h\033[?25h\033[?1049l";
+// "\033[?2004h" turns on bracketed paste, so a pasted newline isn't read as
+// Enter (posting half the paste) and pasted letters aren't run as commands.
+constexpr char kEnterScreen[] = "\033[?1049h\033[?25l\033[?7l\033[>1u\033[?2004h";
+constexpr char kLeaveScreen[] = "\033[?2004l\033[<u\033[0m\033[?7h\033[?25h\033[?1049l";
 
 void restoreTerminal()
 {
@@ -446,6 +448,64 @@ class Terminal
         return true;
     }
 
+    static constexpr char kPasteStart[] = "\033[200~";
+    static constexpr char kPasteEnd[] = "\033[201~";
+
+    // True if buf_ begins a bracketed paste (waiting briefly for the rest of
+    // the marker when only part of it has arrived).
+    bool startsPaste()
+    {
+        const std::string start = kPasteStart;
+        while (buf_.size() < start.size() && start.compare(0, buf_.size(), buf_) == 0)
+            if (!fill(30))
+                return false;
+        return buf_.compare(0, start.size(), start) == 0;
+    }
+
+    // Reads up to the end marker and returns the text as one Paste key. Line
+    // breaks become "\n" whatever the terminal sent (\r\n, \r, ESC E or NEL);
+    // other control characters are dropped.
+    Key readPaste()
+    {
+        const std::string end = kPasteEnd;
+        size_t pos;
+        while ((pos = buf_.find(end, sizeof(kPasteStart) - 1)) == std::string::npos)
+            if (!fill(500))
+            {
+                pos = buf_.size();  // the end marker never came: take what we have
+                break;
+            }
+        const std::string raw = buf_.substr(sizeof(kPasteStart) - 1, pos - (sizeof(kPasteStart) - 1));
+        buf_.erase(0, std::min(buf_.size(), pos + end.size()));
+
+        Key k{Key::Paste};
+        for (size_t i = 0; i < raw.size(); ++i)
+        {
+            const unsigned char c = raw[i];
+            if (c == '\r' || c == '\n')
+            {
+                k.ch += '\n';
+                if (c == '\r' && i + 1 < raw.size() && raw[i + 1] == '\n')
+                    ++i;
+            }
+            else if (c == 0x1B && i + 1 < raw.size() && raw[i + 1] == 'E')
+            {
+                k.ch += '\n';
+                ++i;
+            }
+            else if (c == 0xC2 && i + 1 < raw.size() && static_cast<unsigned char>(raw[i + 1]) == 0x85)
+            {
+                k.ch += '\n';
+                ++i;
+            }
+            else if (c == '\t')
+                k.ch += ' ';
+            else if (c >= 0x20 && c != 0x7F)
+                k.ch += static_cast<char>(c);
+        }
+        return k;
+    }
+
     Key take(size_t n, Key::Type t)
     {
         Key k{t, buf_.substr(0, n)};
@@ -456,6 +516,8 @@ class Terminal
     Key parse()
     {
         unsigned char b = buf_[0];
+        if (b == 0x1B && startsPaste())
+            return readPaste();
         if (b == 0x1B)
         {
             if (buf_.size() == 1 && !fill(30))
@@ -611,6 +673,7 @@ class LineEdit
         switch (k.type)
         {
             case Key::Char: chars_.insert(chars_.begin() + cur_++, k.ch); return true;
+            case Key::Paste: paste(k.ch, false); return true;
             case Key::Backspace:
                 if (cur_ > 0)
                     chars_.erase(chars_.begin() + --cur_);
@@ -660,6 +723,14 @@ class LineEdit
     }
 
     void newline() { chars_.insert(chars_.begin() + cur_++, "\n"); }
+
+    // Inserts pasted text at the cursor; without `multiline` its line breaks
+    // become spaces.
+    void paste(const std::string &text, bool multiline)
+    {
+        for (const auto &g : splitUtf8(text))
+            chars_.insert(chars_.begin() + cur_++, g == "\n" && !multiline ? " " : g);
+    }
 
     // The word the cursor is at the end of ("" after a space).
     std::string wordBeforeCursor() const
@@ -1906,6 +1977,11 @@ class App
         if (k.type == Key::Esc)
         {
             mode_ = Mode::Normal;
+            return;
+        }
+        if (k.type == Key::Paste)
+        {
+            input_.paste(k.ch, mode_ == Mode::PostMessage);  // only messages keep line breaks
             return;
         }
         if (k.type == Key::Enter && k.mods && mode_ == Mode::PostMessage)

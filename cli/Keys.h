@@ -42,8 +42,9 @@ struct Key
         PgUp,
         PgDn,
         Del,
+        Paste,  // a bracketed paste: the whole pasted text, in `ch`
     } type{None};
-    std::string ch;  // for Char: the UTF-8 character; for Ctrl: the letter
+    std::string ch;  // for Char: the UTF-8 character; for Ctrl: the letter; for Paste: the text
 
     // Modifiers held with it, as terminals report them. Shift is already in
     // the case of a Char, and Ctrl in the Ctrl type.
