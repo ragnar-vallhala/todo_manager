@@ -2,6 +2,8 @@
 // the CLI and the TUI.
 #pragma once
 
+#include "Attachments.h"
+
 #include <json/json.h>
 
 #include <cstdint>
@@ -9,6 +11,7 @@
 #include <ctime>
 #include <optional>
 #include <string>
+#include <vector>
 
 struct TodoItem
 {
@@ -23,6 +26,7 @@ struct TodoItem
     int64_t prunedAt{0};    // set on pruned todos, whose ids are their own (p1, p2...)
     int64_t roomId{0};      // the room it's shared in; 0 for none
     std::string claimedBy;  // the agent working on it; "" for nobody
+    std::vector<AttachmentItem> attachments;
 
     bool pruned() const { return prunedAt != 0; }
     std::string idLabel() const { return (pruned() ? "p" : "") + std::to_string(id); }
@@ -218,5 +222,6 @@ inline TodoItem TodoItem::fromJson(const Json::Value &v)
     t.prunedAt = v["prunedAt"].asInt64();
     t.roomId = v["roomId"].isNull() ? 0 : v["roomId"].asInt64();
     t.claimedBy = v["claimedBy"].isString() ? v["claimedBy"].asString() : "";
+    t.attachments = AttachmentItem::listFromJson(v["attachments"]);
     return t;
 }

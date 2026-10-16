@@ -4,9 +4,13 @@
 #include "Keys.h"
 #include "Theme.h"
 
+#include <drogon/utils/Utilities.h>
+
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -14,9 +18,12 @@
 #include <cctype>
 #include <chrono>
 #include <clocale>
+#include <cmath>
 #include <csignal>
 #include <ctime>
 #include <cwchar>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <set>
 #include <utility>
@@ -853,6 +860,83 @@ class LineEdit
     size_t cur_{0};
 };
 
+// ────────────────────────── Attachments ─────────────────────────
+
+// Images show inside the UI in kitty (its graphics protocol); elsewhere,
+// and for PDFs, files open in the desktop's viewer.
+bool inKitty()
+{
+    const char *term = std::getenv("TERM");
+    return std::getenv("KITTY_WINDOW_ID") || (term && std::string(term) == "xterm-kitty");
+}
+
+// Where opened attachments are kept: $XDG_CACHE_HOME/todo/files, else
+// ~/.cache/todo/files.
+std::filesystem::path fileCacheDir()
+{
+    if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+        return std::filesystem::path(xdg) / "todo" / "files";
+    const char *home = std::getenv("HOME");
+    return std::filesystem::path(home ? home : ".") / ".cache" / "todo" / "files";
+}
+
+std::string shellQuote(const std::string &s)
+{
+    std::string out = "'";
+    for (char ch : s)
+        out += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
+    return out + "'";
+}
+
+// Runs `xdg-open path` in the background, detached from the terminal, so
+// the viewer's output doesn't land on the screen.
+void openExternally(const std::string &path)
+{
+    const pid_t pid = fork();
+    if (pid == 0)
+    {
+        setsid();
+        if (fork() == 0)
+        {
+            const int null = ::open("/dev/null", O_RDWR);
+            dup2(null, STDIN_FILENO);
+            dup2(null, STDOUT_FILENO);
+            dup2(null, STDERR_FILENO);
+            execlp("xdg-open", "xdg-open", path.c_str(), static_cast<char *>(nullptr));
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, nullptr, 0);
+}
+
+// A PNG's size from its header; 0 x 0 if it isn't one.
+std::pair<int, int> pngSize(const std::string &png)
+{
+    if (png.size() < 24 || png.compare(0, 8, "\x89PNG\r\n\x1a\n") != 0)
+        return {0, 0};
+    auto be32 = [&](size_t i) {
+        return static_cast<int>(static_cast<unsigned char>(png[i]) << 24 |
+                                static_cast<unsigned char>(png[i + 1]) << 16 |
+                                static_cast<unsigned char>(png[i + 2]) << 8 |
+                                static_cast<unsigned char>(png[i + 3]));
+    };
+    return {be32(16), be32(20)};
+}
+
+// "717 B", "18 KB", "2.4 MB".
+std::string sizeLabel(int64_t n)
+{
+    char buf[32];
+    if (n < 1024)
+        std::snprintf(buf, sizeof(buf), "%lld B", static_cast<long long>(n));
+    else if (n < 1024 * 1024)
+        std::snprintf(buf, sizeof(buf), "%lld KB", static_cast<long long>(n / 1024));
+    else
+        std::snprintf(buf, sizeof(buf), "%.1f MB", n / (1024.0 * 1024.0));
+    return buf;
+}
+
 // ───────────────────────────── App ──────────────────────────────
 
 // Pruned todos are done ones moved aside (ids p1, p2...) to free their ids.
@@ -880,9 +964,10 @@ enum class Mode
     ConfirmPruneLog,
     ConfirmClear,
     Help,
+    ViewFile,  // an image shown over the UI (kitty only)
 };
 enum class Focus { Categories, Todos, Details };
-enum class PickFor { ShowCategory, MoveTodo, MoveCategory, Priority, Theme };
+enum class PickFor { ShowCategory, MoveTodo, MoveCategory, Priority, Theme, File };
 
 // Pseudo-categories in the categories panel.
 constexpr int64_t kAll = -1;      // every todo not in the archive
@@ -1273,6 +1358,9 @@ class App
     {
         input_.set(text);
         mode_ = mode;
+        pendingFiles_.clear();
+        offerPath_.clear();
+        declined_.clear();
     }
 
     // ── theme ──
@@ -1354,7 +1442,8 @@ class App
                     if (t.id == subject)
                         current = t.priority;
                 break;
-            case PickFor::Theme: break;
+            case PickFor::Theme:
+            case PickFor::File: break;
         }
         for (const auto &[c, depth] : tree_.flatten(0, true))
         {
@@ -1432,6 +1521,10 @@ class App
                     collapsed_.erase(id);
                     selectCategory(subject);
                     break;
+                case PickFor::File:
+                    if (static_cast<size_t>(id) < pickFiles_.size())
+                        openAttachment(pickFiles_[static_cast<size_t>(id)]);
+                    break;
                 case PickFor::Theme:
                     if (!saveThemeChoice(theme_.name))
                         flash("Couldn't save theme choice to " + configDir() + "/theme", true);
@@ -1476,10 +1569,16 @@ class App
             case Mode::AddRoom:
             case Mode::RenameRoom:
             case Mode::RoomTopic:
-            case Mode::PostMessage:
                 if (!handleMention(k))
                     handleInput(k);
                 break;
+            case Mode::PostMessage:
+                if (!offerPath_.empty())
+                    handleOffer(k);
+                else if (!handleMention(k))
+                    handleInput(k);
+                break;
+            case Mode::ViewFile: closeView(); break;  // any key
             case Mode::Search: handleSearch(k); break;
             case Mode::Pick: handlePick(k); break;
             case Mode::ConfirmDeleteTodo:
@@ -1588,6 +1687,8 @@ class App
                 return flash("Say who you are first: todo --as NAME, or $TODO_AGENT", true);
             startInput(Mode::PostMessage, "");
         }
+        else if (on("open_file"))
+            openFileKey();
         else if (focus_ == Focus::Categories && wide_)
             handleCategoryKeys(k);
         else
@@ -1981,7 +2082,16 @@ class App
         }
         if (k.type == Key::Paste)
         {
+            // A pasted (or dropped) path to an image or PDF: offer to attach it.
+            if (mode_ == Mode::PostMessage && offerFile(attach::pathFromText(k.ch), k.ch, ""))
+                return;
             input_.paste(k.ch, mode_ == Mode::PostMessage);  // only messages keep line breaks
+            return;
+        }
+        if (mode_ == Mode::PostMessage && k.type == Key::Backspace && input_.text().empty() &&
+            !pendingFiles_.empty())
+        {
+            pendingFiles_.pop_back();  // backspace in an empty box drops the last file
             return;
         }
         if (k.type == Key::Enter && k.mods && mode_ == Mode::PostMessage)
@@ -1994,10 +2104,13 @@ class App
             input_.handle(k);
             return;
         }
+        // A typed path to an image or PDF: offer to attach it before posting.
+        if (mode_ == Mode::PostMessage && offerTyped())
+            return;
         std::string text = trim(input_.text());
-        // An empty deadline, style or topic clears it.
+        // An empty deadline, style or topic clears it; a post can be just files.
         if (text.empty() && mode_ != Mode::SetDeadline && mode_ != Mode::StyleCategory &&
-            mode_ != Mode::RoomTopic)
+            mode_ != Mode::RoomTopic && !(mode_ == Mode::PostMessage && !pendingFiles_.empty()))
         {
             flash(mode_ == Mode::AddTodo || mode_ == Mode::EditTodo ? "Title can't be empty"
                   : mode_ == Mode::PostMessage                      ? "Nothing to post"
@@ -2121,7 +2234,15 @@ class App
             case Mode::PostMessage:
             {
                 const int64_t room = sayRoom_;
-                ok = act([&] { api_.post(room, text); });
+                const auto paths = pendingFiles_;
+                if (!paths.empty())
+                    flash("Uploading " + std::to_string(paths.size()) + " file(s)...", false);
+                ok = act([&] {
+                    std::vector<AttachmentItem> files;
+                    for (const auto &p : paths)
+                        files.push_back(api_.upload(p));
+                    api_.post(room, text, files);
+                });
                 logFollow_ = true;
                 break;
             }
@@ -2130,6 +2251,222 @@ class App
         if (ok)  // on failure keep the popup open so the text can be fixed
             mode_ = Mode::Normal;
         syncSelection();
+    }
+
+    // ── attachments ──
+
+    // Offers to attach the file at `path` if it's one the server takes (and
+    // wasn't turned down already). `paste` is the pasted text, put in the box
+    // if it's turned down; `token` is the typed word, taken out if it's
+    // attached. True if it's offered.
+    bool offerFile(const std::string &path, const std::string &paste, const std::string &token)
+    {
+        if (path.empty() || declined_.count(path) || attach::sniff(path).empty() ||
+            std::find(pendingFiles_.begin(), pendingFiles_.end(), path) != pendingFiles_.end())
+            return false;
+        offerPath_ = path;
+        offerPaste_ = paste;
+        offerToken_ = token;
+        return true;
+    }
+
+    // Looks for a path to a file in the message being posted: all of it,
+    // else each word. True if one is offered.
+    bool offerTyped()
+    {
+        const std::string text = trim(input_.text());
+        if (offerFile(attach::pathFromText(text), "", text))
+            return true;
+        std::istringstream words(text);
+        for (std::string w; words >> w;)
+            if (offerFile(attach::pathFromText(w), "", w))
+                return true;
+        return false;
+    }
+
+    // y attaches the offered file, n leaves the text as it is.
+    void handleOffer(const Key &k)
+    {
+        if (keys_.is(k, "confirm_yes"))
+        {
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(offerPath_, ec);
+            if (ec || static_cast<int64_t>(size) > attach::kMaxSize)
+            {
+                flash(attach::baseName(offerPath_) + (ec ? " can't be read" : " is over 10 MB"), true);
+                declined_.insert(offerPath_);
+            }
+            else
+            {
+                pendingFiles_.push_back(offerPath_);
+                if (!offerToken_.empty())  // the typed path goes; the file stands for it
+                {
+                    std::string text = input_.text();
+                    if (auto at = text.find(offerToken_); at != std::string::npos)
+                        text.erase(at, offerToken_.size());
+                    for (size_t p; (p = text.find("  ")) != std::string::npos;)
+                        text.erase(p, 1);
+                    input_.set(trim(text));
+                }
+            }
+        }
+        else if (keys_.is(k, "confirm_no"))
+        {
+            declined_.insert(offerPath_);
+            if (!offerPaste_.empty())
+                input_.paste(offerPaste_, true);
+        }
+        else
+            return;
+        offerPath_.clear();
+    }
+
+    // What the open_file key shows: in a room, the files of the messages in
+    // view (newest first), else the selected todo's.
+    std::vector<AttachmentItem> filesInView() const
+    {
+        if (!isRoomView(catSelId_))
+        {
+            const TodoItem *t = selected();
+            return t ? t->attachments : std::vector<AttachmentItem>{};
+        }
+        if (!logFiles_.empty() || wide_)
+            return logFiles_;
+        // No log on screen (a narrow terminal): any of the room's.
+        std::vector<AttachmentItem> all;
+        for (auto m = log_.rbegin(); m != log_.rend(); ++m)
+            all.insert(all.end(), m->attachments.begin(), m->attachments.end());
+        return all;
+    }
+
+    // One file opens right away; with more, a list to pick from.
+    void openFileKey()
+    {
+        pickFiles_ = filesInView();
+        if (pickFiles_.empty())
+            return flash(isRoomView(catSelId_) ? "No attachments in the messages in view"
+                                               : "No attachments on this todo",
+                         true);
+        if (pickFiles_.size() == 1)
+            return openAttachment(pickFiles_[0]);
+        pickFor_ = PickFor::File;
+        pickOptions_.clear();
+        for (size_t i = 0; i < pickFiles_.size(); ++i)
+            pickOptions_.push_back({static_cast<int64_t>(i), pickFiles_[i].marker(), 0});
+        pickSel_ = 0;
+        pickOffset_ = 0;
+        mode_ = Mode::Pick;
+    }
+
+    // Downloads `a` (once, into the cache) and shows it: inline in kitty for
+    // images, else with xdg-open.
+    void openAttachment(const AttachmentItem &a)
+    {
+        namespace fs = std::filesystem;
+        const std::string base = attach::baseName(a.name);
+        const fs::path dir = fileCacheDir() / a.id;
+        const fs::path path = dir / (base.empty() || base == "." || base == ".." ? a.label() : base);
+        std::error_code ec;
+        if (!fs::exists(path, ec))
+        {
+            std::string data;
+            try
+            {
+                data = api_.download(a.id);
+            }
+            catch (const ApiError &e)
+            {
+                online_ = !e.offline;
+                return flash(e.what(), true);
+            }
+            fs::create_directories(dir, ec);
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(data.data(), static_cast<std::streamsize>(data.size()));
+            if (!out)
+                return flash("Couldn't save " + path.string(), true);
+        }
+        if (a.image() && inKitty() && showInline(a, path))
+            return;
+        openExternally(path.string());
+        flash("Opening " + a.name + " (xdg-open)", false);
+    }
+
+    // Shows image `a`, saved at `path`, over the UI. Kitty takes PNG, so
+    // other images are converted with ImageMagick first; false if that fails.
+    bool showInline(const AttachmentItem &a, const std::filesystem::path &path)
+    {
+        std::filesystem::path png = path;
+        std::error_code ec;
+        if (a.type != "image/png")
+        {
+            png = path.parent_path() / "view.png";
+            const std::string from = shellQuote(path.string() + "[0]"), to = shellQuote("png:" + png.string());
+            if (!std::filesystem::exists(png, ec) &&
+                std::system(("(magick " + from + " " + to + " || convert " + from + " " + to +
+                             ") >/dev/null 2>&1")
+                                .c_str()) != 0)
+                return false;
+        }
+        std::ifstream in(png, std::ios::binary);
+        std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto [w, h] = pngSize(data);
+        if (!w || !h)
+            return false;
+        viewFile_ = a;
+        viewPng_ = std::move(data);
+        viewW_ = w;
+        viewH_ = h;
+        viewSent_ = viewPlaced_ = false;
+        mode_ = Mode::ViewFile;
+        return true;
+    }
+
+    static constexpr int kImageId = 7317;  // our image's id in kitty
+
+    // Puts the image in the middle of viewBox_, as big as fits (never
+    // enlarged), sending it to the terminal the first time.
+    void placeImage(Terminal &term)
+    {
+        winsize ws{};
+        ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+        // Cell size in pixels, guessed when the terminal doesn't say.
+        const double cw = ws.ws_xpixel && ws.ws_col ? static_cast<double>(ws.ws_xpixel) / ws.ws_col : 8;
+        const double ch = ws.ws_ypixel && ws.ws_row ? static_cast<double>(ws.ws_ypixel) / ws.ws_row : 16;
+        const auto [bx, by, bw, bh] = viewBox_;
+        if (bw <= 0 || bh <= 0)
+            return;
+        const double scale = std::min({bw * cw / viewW_, bh * ch / viewH_, 1.0});
+        const int cols = std::clamp(static_cast<int>(std::ceil(viewW_ * scale / cw)), 1, bw);
+        const int rows = std::clamp(static_cast<int>(std::ceil(viewH_ * scale / ch)), 1, bh);
+        const std::string id = std::to_string(kImageId);
+        // q=2: no replies, which would arrive as keys.
+        std::string out = "\033_Ga=d,d=i,i=" + id + ",q=2\033\\";
+        out += "\033[" + std::to_string(by + (bh - rows) / 2 + 1) + ";" +
+               std::to_string(bx + (bw - cols) / 2 + 1) + "H";
+        const std::string place = "i=" + id + ",c=" + std::to_string(cols) + ",r=" +
+                                  std::to_string(rows) + ",C=1,q=2";
+        if (!viewSent_)
+        {
+            // Sent base64-encoded, in chunks of 4096.
+            const std::string b64 = drogon::utils::base64Encode(viewPng_);
+            for (size_t off = 0; off < b64.size(); off += 4096)
+                out += "\033_G" + (off ? std::string("q=2,") : "a=T,f=100," + place + ",") +
+                       "m=" + (off + 4096 < b64.size() ? "1" : "0") + ";" + b64.substr(off, 4096) +
+                       "\033\\";
+            viewSent_ = true;
+        }
+        else
+            out += "\033_Ga=p," + place + "\033\\";
+        term.write(out);
+        viewPlaced_ = true;
+    }
+
+    void closeView()
+    {
+        term_->write("\033_Ga=d,d=I,i=" + std::to_string(kImageId) + ",q=2\033\\");
+        viewPng_.clear();
+        mode_ = Mode::Normal;
+        lastFrame_.clear();  // redraw what was under it
     }
 
     void handleSearch(const Key &k)
@@ -2260,6 +2597,7 @@ class App
         }
 
         int cx = -1, cy = -1;  // where to show the text cursor, if anywhere
+        logFiles_.clear();     // drawRoomLog fills it
         if (W < 30 || H < 8)
         {
             c_.text(0, 0, "Terminal too small", Style(theme_.pending));
@@ -2313,6 +2651,7 @@ class App
                 case Mode::ConfirmClear: drawConfirmPopup(W, H); break;
                 case Mode::Pick: drawPickPopup(W, H); break;
                 case Mode::Help: drawHelpPopup(W, H); break;
+                case Mode::ViewFile: drawViewPopup(W, H); break;
                 default: break;
             }
         }
@@ -2326,7 +2665,10 @@ class App
         {
             term.write(frame);
             lastFrame_ = std::move(frame);
+            viewPlaced_ = false;  // the image goes back on top
         }
+        if (mode_ == Mode::ViewFile && !viewPlaced_)
+            placeImage(term);
     }
 
     void drawStatus(int x, int y, int w, int h)
@@ -2491,12 +2833,15 @@ class App
                                         : Style(look.fg == Default ? look.text : look.fg, bg, look.attrs);
             if (t.done && !sel)
                 titleStyle.attrs |= strike | look.attrs;
-            // A ≡ after the title says there's a description (see details).
-            const int mark = t.description.empty() ? 0 : 2;
+            // A ≡ after the title says there's a description, a + that there
+            // are attachments (see details).
+            const std::string marks = std::string(t.description.empty() ? "" : "≡") +
+                                      (t.attachments.empty() ? "" : "+");
+            const int mark = marks.empty() ? 0 : 1 + textWidth(marks);
             const int end = c_.text(cx + 2, row, truncate(t.title, titleEnd - (cx + 2) - mark),
                                     titleStyle, maxX);
             if (mark)
-                c_.text(end + 1, row, "≡", dim, maxX);
+                c_.text(end + 1, row, marks, dim, maxX);
         }
     }
 
@@ -2557,20 +2902,27 @@ class App
         const TodoItem *t = selected();
         const int inner = w - 4;
         const int maxX = x + w - 1;
-        // The title in bold, then the description (its own lines kept).
-        std::vector<std::pair<std::string, bool>> lines;  // (text, bold)
+        // The title in bold, then the description (its own lines kept), then
+        // the attachments.
+        enum Kind { Plain, Title, File };
+        std::vector<std::pair<std::string, Kind>> lines;
         if (t)
         {
             for (const auto &l : wrap(t->title, inner))
-                lines.push_back({l, true});
+                lines.push_back({l, Title});
             if (!t->description.empty())
             {
-                lines.push_back({"", false});
+                lines.push_back({"", Plain});
                 std::istringstream desc(t->description);
                 for (std::string para; std::getline(desc, para);)
                     for (const auto &l : wrap(para, inner))
-                        lines.push_back({l, false});
+                        lines.push_back({l, Plain});
             }
+            if (!t->attachments.empty())
+                lines.push_back({"", Plain});
+            for (const auto &a : t->attachments)
+                for (const auto &l : wrap(a.marker(), inner))
+                    lines.push_back({l, File});
         }
         // The title scrolls under the info line; a new todo starts at the top.
         const int avail = std::max(h - 3, 0);
@@ -2627,8 +2979,10 @@ class App
 
         for (int i = 0; i < avail && detailsOffset_ + i < static_cast<int>(lines.size()); ++i)
         {
-            const auto &[text, bold] = lines[detailsOffset_ + i];
-            c_.text(x + 2, y + 2 + i, text, Style(Default, Default, bold ? Bold : 0), maxX);
+            const auto &[text, kind] = lines[detailsOffset_ + i];
+            c_.text(x + 2, y + 2 + i, text,
+                    kind == File ? Style(theme_.category) : Style(Default, Default, kind == Title ? Bold : 0),
+                    maxX);
         }
     }
 
@@ -2645,24 +2999,33 @@ class App
         {
             std::string time, author, text;  // time/author only on a message's first line
             bool event, mine;
+            bool file;   // an attachment's [image: ...] marker
+            size_t msg;  // which of log_ it's from
         };
         std::vector<Line> lines;
-        for (const auto &m : log_)
+        for (size_t mi = 0; mi < log_.size(); ++mi)
         {
+            const auto &m = log_[mi];
             const std::string time = rooms::clock(m.createdAt);
             const std::string who = m.author.empty() ? "server" : m.author;
             // Events read as a sentence: "alice claimed #3 ...".
             const std::string head = time + " " + who + (m.event ? " " : ": ");
             const int indent = textWidth(time) + 1;
-            std::istringstream paras(m.text);
+            // The text's lines, then one per attachment.
+            std::vector<std::pair<std::string, bool>> paras;
+            std::istringstream text(m.text);
+            for (std::string para; std::getline(text, para);)
+                paras.push_back({para, false});
+            for (const auto &a : m.attachments)
+                paras.push_back({a.marker(), true});
             bool first = true;
-            for (std::string para; std::getline(paras, para);)
+            for (const auto &[para, file] : paras)
             {
                 const int room = std::max(inner - (first ? textWidth(head) : indent), 8);
                 for (const auto &l : wrap(para, room))
                 {
                     lines.push_back({first ? time : std::string(indent - 1, ' '), first ? who : "", l,
-                                     m.event, m.author == api_.agent()});
+                                     m.event, m.author == api_.agent(), file, mi});
                     first = false;
                 }
             }
@@ -2678,7 +3041,17 @@ class App
         detailsOffset_ = std::clamp(detailsOffset_, 0, maxOffset);
         logFollow_ = detailsOffset_ == maxOffset;  // scrolling back down resumes following
 
+        // The files of the messages in view, newest first, for open_file.
+        std::set<size_t> shownMsgs;
+        for (int i = 0; i < avail && detailsOffset_ + i < static_cast<int>(lines.size()); ++i)
+            shownMsgs.insert(lines[detailsOffset_ + i].msg);
+        for (auto mi = shownMsgs.rbegin(); mi != shownMsgs.rend(); ++mi)
+            logFiles_.insert(logFiles_.end(), log_[*mi].attachments.begin(), log_[*mi].attachments.end());
+
         std::string footer = " " + keys_.labels("room_say", 1) + " post ";
+        if (!logFiles_.empty() && !keys_.labels("open_file", 1).empty())
+            footer += "· " + keys_.labels("open_file", 1) + " file" +
+                      (logFiles_.size() > 1 ? "s (" + std::to_string(logFiles_.size()) + ") " : " ");
         if (detailsOffset_ < maxOffset)
             footer = " " + std::to_string(maxOffset - detailsOffset_) + " lines below ·" + footer;
         panel(x, y, w, h, panelTitle("focus_details", "Room " + (room ? room->name : "?")), active,
@@ -2719,6 +3092,11 @@ class App
                 lx = c_.text(lx, row, l.author, Style(l.mine ? theme_.success : theme_.accent, Default, Bold),
                              maxX);
                 lx = c_.text(lx, row, ": ", muted(), maxX);
+            }
+            if (l.file)
+            {
+                c_.text(lx, row, l.text, Style(theme_.category), maxX);
+                continue;
             }
             // Mentions stand out: ours highlighted, others in the accent color.
             for (const auto &[part, kind] : rooms::splitMentions(l.text, api_.agent()))
@@ -2775,6 +3153,7 @@ class App
                       {key("cat_style"), "topic"},
                       {key("cat_delete"), "delete"},
                       {key("room_say"), "post"},
+                      {filesInView().empty() ? "" : key("open_file"), "show file"},
                       {key("room_prune"), "prune log"},
                       {key("new_todo"), "new todo"},
                       {key("help"), "help"},
@@ -2795,6 +3174,7 @@ class App
         else if (focus_ == Focus::Details)
             keyHints(y, w,
                      {{pair("down", "up"), "scroll"},
+                      {filesInView().empty() ? "" : key("open_file"), "show file"},
                       {pair("resize_up", "resize_down"), "taller / shorter"},
                       {pair("resize_left", "resize_right"), "side width"},
                       {key("reset_layout"), "reset sizes"},
@@ -2808,6 +3188,7 @@ class App
                       {key("todo_toggle"), "toggle"},
                       {key("todo_claim"), "claim"},
                       {isRoomView(catSelId_) ? key("room_say") : "", "post"},
+                      {filesInView().empty() ? "" : key("open_file"), "show file"},
                       {key("todo_move"), "move"},
                       {key("todo_priority"), "priority"},
                       {key("todo_deadline"), "deadline"},
@@ -2868,15 +3249,40 @@ class App
         cy = y + 1;
     }
 
-    // A post can run to several lines; the box grows to show up to 10.
+    // A post can run to several lines; the box grows to show up to 10. Under
+    // the text: the files to attach, and the offer to attach one.
     void drawPostPopup(int W, int H, int &cx, int &cy)
     {
         const int w = std::min(W - 4, 72);
-        const int rows = std::clamp(input_.rows(w - 4), 1, std::max(1, std::min(10, H - 4)));
-        auto [x, y] = popup(W, H, w, rows + 2, "Post to " + roomName(sayRoom_) + " as " + api_.agent(),
-                            " enter post · shift/alt+enter new line · esc cancel ");
+        const int extra = !pendingFiles_.empty() + !offerPath_.empty();
+        const int rows = std::clamp(input_.rows(w - 4), 1, std::max(1, std::min(10, H - 4 - extra)));
+        const std::string footer =
+            !offerPath_.empty()     ? " " + keys_.labels("confirm_yes", 1) + " attach · " +
+                                      keys_.labels("confirm_no", 1) + " leave it as text "
+            : !pendingFiles_.empty() ? " enter post · backspace in an empty box drops a file · esc cancel "
+                                     : " enter post · shift/alt+enter new line · esc cancel ";
+        auto [x, y] = popup(W, H, w, rows + 2 + extra,
+                            "Post to " + roomName(sayRoom_) + " as " + api_.agent(), footer);
         std::tie(cx, cy) = input_.drawWrapped(c_, x + 2, y + 1, w - 4, rows, Style());
-        drawMentions(x, y + rows + 2, w, H);
+        int line = y + 1 + rows;
+        if (!pendingFiles_.empty())
+        {
+            std::string names;
+            for (const auto &p : pendingFiles_)
+                names += (names.empty() ? "" : ", ") + attach::baseName(p);
+            c_.text(x + 2, line++, truncate("Attached: " + names, w - 4), Style(theme_.category), x + w - 1);
+        }
+        if (!offerPath_.empty())
+        {
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(offerPath_, ec);
+            c_.text(x + 2, line, truncate("Attach " + attach::baseName(offerPath_) + " (" +
+                                              attach::sniff(offerPath_) + ", " +
+                                              sizeLabel(ec ? 0 : static_cast<int64_t>(size)) + ")?",
+                                          w - 4),
+                    Style(theme_.pending, Default, Bold), x + w - 1);
+        }
+        drawMentions(x, y + rows + 2 + extra, w, H);
     }
 
     // The "@name" suggestions, in a box under the input.
@@ -2963,6 +3369,8 @@ class App
         std::string title = "Show category";
         if (pickFor_ == PickFor::Theme)
             title = "Theme";
+        else if (pickFor_ == PickFor::File)
+            title = "Show which file";
         else if (pickFor_ == PickFor::MoveTodo)
             title = "Move #" + std::to_string(pickSubject_) + " to";
         else if (pickFor_ == PickFor::Priority)
@@ -2987,12 +3395,22 @@ class App
             if (sel)
                 c_.fill(x + 1, line, w - 2, 1, Style(Default, bg));
             const bool isCategory = pickFor_ != PickFor::Theme && pickFor_ != PickFor::Priority &&
-                                    opt.id > 0;
+                                    pickFor_ != PickFor::File && opt.id > 0;
             c_.text(x + 2 + 2 * opt.depth, line, opt.label,
                     Style(sel ? theme_.selectionFg : isCategory ? theme_.category : Default, bg,
                           sel ? Bold : 0),
                     x + w - 1);
         }
+    }
+
+    // A frame for the image (placeImage draws it inside).
+    void drawViewPopup(int W, int H)
+    {
+        const std::string dims = std::to_string(viewW_) + "x" + std::to_string(viewH_);
+        const int w = W - 2, h = H - 2;
+        auto [x, y] = popup(W, H, w, h, viewFile_.name + " · " + dims + " · " + viewFile_.label(),
+                            " any key closes ");
+        viewBox_ = {x + 2, y + 1, w - 4, h - 2};
     }
 
     // Every action with its keys, by group; scrolls when it doesn't fit.
@@ -3054,6 +3472,18 @@ class App
     bool logFollow_{true};          // keep the newest message in view
     int64_t sayRoom_{0};            // where PostMessage posts
     int mentionSel_{0};             // the highlighted "@name" suggestion
+    std::vector<AttachmentItem> logFiles_;   // those of the messages drawn in the log
+    std::vector<AttachmentItem> pickFiles_;  // what PickFor::File picks from
+    std::vector<std::string> pendingFiles_;  // paths to attach to the post
+    std::string offerPath_;   // a file the post box offers to attach ("" for none)
+    std::string offerPaste_;  // the paste it came from, put in if turned down
+    std::string offerToken_;  // or the typed word, taken out if attached
+    std::set<std::string> declined_;  // files not to offer again in this post
+    AttachmentItem viewFile_;  // the image ViewFile shows
+    std::string viewPng_;      // it as PNG, for kitty
+    int viewW_{0}, viewH_{0};
+    bool viewSent_{false}, viewPlaced_{false};
+    std::tuple<int, int, int, int> viewBox_{0, 0, 0, 0};  // x, y, columns, rows for it
     CategoryTree tree_;
     bool online_{true};
     Clock::time_point lastLoad_{};

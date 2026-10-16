@@ -2,6 +2,8 @@
 // a message log and the todos shared there.
 #pragma once
 
+#include "Attachments.h"
+
 #include <json/json.h>
 
 #include <cstdint>
@@ -50,18 +52,21 @@ struct MessageItem
     bool event{false};
     int64_t todoId{0};
     int64_t prunedAt{0};  // pruned messages only
+    std::vector<AttachmentItem> attachments;
 
     static MessageItem fromJson(const Json::Value &v)
     {
-        return {v["id"].asInt64(),
-                v["seq"].asInt64(),
-                v["roomId"].asInt64(),
-                v["author"].isString() ? v["author"].asString() : "",
-                v["text"].asString(),
-                v["createdAt"].asInt64(),
-                v["kind"].asString() == "event",
-                v["todoId"].isNull() ? 0 : v["todoId"].asInt64(),
-                v["prunedAt"].asInt64()};
+        MessageItem m{v["id"].asInt64(),
+                      v["seq"].asInt64(),
+                      v["roomId"].asInt64(),
+                      v["author"].isString() ? v["author"].asString() : "",
+                      v["text"].asString(),
+                      v["createdAt"].asInt64(),
+                      v["kind"].asString() == "event",
+                      v["todoId"].isNull() ? 0 : v["todoId"].asInt64(),
+                      v["prunedAt"].asInt64()};
+        m.attachments = AttachmentItem::listFromJson(v["attachments"]);
+        return m;
     }
 };
 

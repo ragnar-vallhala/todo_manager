@@ -281,6 +281,7 @@ inline const std::vector<Action> &actions()
 
         {"room_say", "i", "Rooms", "post a message to the room"},
         {"room_prune", "P", "Rooms", "prune the room's messages (on a room row)"},
+        {"open_file", "v", "Rooms", "show an attached image / file"},
 
         {"confirm_yes", "y Y enter", "Popups", "confirm"},
         {"confirm_no", "n N q esc", "Popups", "cancel"},

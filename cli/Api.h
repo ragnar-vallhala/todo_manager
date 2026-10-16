@@ -8,6 +8,8 @@
 #include <drogon/HttpClient.h>
 #include <trantor/net/EventLoopThread.h>
 
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -271,11 +273,55 @@ class Api
         return out;
     }
 
-    MessageItem post(int64_t roomId, const std::string &text)
+    // `text` may be "" when there are attachments (uploaded with upload()).
+    MessageItem post(int64_t roomId, const std::string &text,
+                     const std::vector<AttachmentItem> &attachments = {})
     {
         Json::Value body;
         body["text"] = text;
+        if (!attachments.empty())
+            body["attachments"] = AttachmentItem::listToJson(attachments);
         return MessageItem::fromJson(send(drogon::Post, roomPath(roomId) + "/messages", &body));
+    }
+
+    // ── files ──
+
+    // Uploads the file at `path` (an image or PDF, at most 10 MB) so it can
+    // be attached; throws ApiError if it can't be read or the server says no.
+    AttachmentItem upload(const std::string &path)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+            throw ApiError("can't read " + path, false);
+        std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (static_cast<int64_t>(data.size()) > attach::kMaxSize)
+            throw ApiError(path + " is over 10 MB, the most the server takes", false);
+        auto req = drogon::HttpRequest::newHttpRequest();
+        req->setMethod(drogon::Post);
+        req->setPath("/api/files");
+        req->setParameter("name", attach::baseName(path));
+        req->setContentTypeString("application/octet-stream");
+        req->setBody(std::move(data));
+        return AttachmentItem::fromJson(sendRequest(req, 60));
+    }
+
+    // The bytes of file `id`.
+    std::string download(const std::string &id)
+    {
+        auto req = drogon::HttpRequest::newHttpRequest();
+        req->setMethod(drogon::Get);
+        req->setPath("/api/files/" + id);
+        std::string body;
+        sendRequest(req, 60, &body);
+        return body;
+    }
+
+    // Replaces the todo's attachments.
+    TodoItem setAttachments(int64_t id, const std::vector<AttachmentItem> &attachments)
+    {
+        Json::Value body;
+        body["attachments"] = AttachmentItem::listToJson(attachments);
+        return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
     }
 
     // Pruning moves messages out of the log (they get pN ids), freeing their ids.
@@ -350,6 +396,15 @@ class Api
         req->setPath(path);
         for (const auto &[k, v] : params)
             req->setParameter(k, v);
+        return sendRequest(req, timeout);
+    }
+
+    // Sends `req` (as us); the JSON body back, or with `raw`, the body
+    // itself goes there instead.
+    Json::Value sendRequest(const drogon::HttpRequestPtr &req, double timeout,
+                            std::string *raw = nullptr)
+    {
+        using namespace drogon;
         if (!agent_.empty())
             req->addHeader("X-Todo-Agent", agent_);
 
@@ -359,6 +414,11 @@ class Api
                                to_string(result) + ")",
                            true);
 
+        if (raw && resp->statusCode() < 400)
+        {
+            *raw = std::string(resp->body());
+            return Json::Value();
+        }
         auto json = resp->getJsonObject();
         if (resp->statusCode() >= 400)
             throw ApiError(json && json->isMember("error")

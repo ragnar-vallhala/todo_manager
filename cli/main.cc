@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -92,17 +93,22 @@ Todos:
   list, ls [all|pending|done|pruned] [-c CAT] [-r ROOM]
                                       show todos, grouped by category
                                       (archived ones only with -c ARCHIVED_CAT)
-  add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] <title...>
+  add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] [--file PATH...] <title...>
                                       add a todo (to category CAT, shared in
-                                      ROOM), -m with a description
+                                      ROOM), -m with a description, --file
+                                      with images or PDFs attached
   done <id...>                        mark todo(s) done
   undo <id...>                        mark todo(s) not done
   edit <id> <title...>                rename a todo
-  set <id...> [-p PRI] [-d DUE] [-r ROOM]
+  set <id...> [-p PRI] [-d DUE] [-r ROOM] [--file PATH...|none]
                                       set or change priority / deadline /
-                                      room (none takes it out of its room)
-  desc <id> [TEXT...|-|none]          show a todo's description, or set it
-                                      (- reads it from stdin, none clears it)
+                                      room (none takes it out of its room);
+                                      --file attaches files (none: removes
+                                      them all)
+  desc <id> [TEXT...|-|none]          show a todo's description and
+                                      attachments, or set it (- reads it
+                                      from stdin, none clears it)
+  get <FILE-ID> [-o PATH]             save a todo's attachment (see room get)
   mv <id...> <CAT>                    move todo(s) to CAT ("/" = no category)
   rm <id...>                          delete todo(s); pN deletes a pruned one
   prune [id...]                       move done todo(s) to the pruned list
@@ -149,7 +155,13 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
   room forget <ROOM> <NAME...>        remove members (e.g. old agents) so they
                                       stop being suggested; anyone who posts
                                       or reads the room again rejoins
-  room say <ROOM> <TEXT...|->         post a message (- reads stdin)
+  room say <ROOM> [--file PATH...] <TEXT...|->
+                                      post a message (- reads stdin), with
+                                      files attached (images or PDFs, up to
+                                      10 MB each; the text can be left out)
+  room get <ROOM> <FILE-ID> [-o PATH] save an attachment (to PATH, a file or
+                                      folder, else its name here); prints
+                                      where it went
   room read <ROOM> [--since ID] [-n N]
                                       messages after ID, else the last N (20)
   room wait <ROOM> [--since ID] [-t SECONDS]
@@ -168,6 +180,8 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
   Messages print as [#ID] time author: text, in the order they were posted;
   pass the last ID as --since to read on from there. New messages take the
   lowest id free in the room. Changes to a room's todos show up as events.
+  Attachments print under the text as [image: NAME WxH, fID] or
+  [file: NAME, fID]; fID is what room get takes.
 
 Who you are in rooms, first match wins: --as NAME, $TODO_AGENT, $USER.
 
@@ -305,6 +319,9 @@ void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0, const std:
     std::cout << (t.done ? part("2;9", t.title) : t.title);
     if (!t.description.empty())
         std::cout << " " << part("2", "≡");  // has a description: todo desc ID
+    if (!t.attachments.empty())  // listed by todo desc ID
+        std::cout << " " << part("2", "[" + std::to_string(t.attachments.size()) +
+                                          (t.attachments.size() == 1 ? " file]" : " files]"));
     if (!t.deadline.empty())
         std::cout << "  " << part(t.done ? "2" : todo::overdue(t) ? "1;31" : todo::dueToday(t) ? "33" : "2",
                                   "due " + todo::dueLabel(t.deadline));
@@ -361,7 +378,72 @@ int64_t cursorAfter(Api &api, const RoomItem &room, const std::string &ref)
                      " (pruned, or too old; see: todo room read " + room.name + ")");
 }
 
+// ── attachments ──
+
+// Takes every --file PATH out of args.
+std::vector<std::string> takeFiles(std::vector<std::string> &args)
+{
+    std::vector<std::string> out;
+    while (auto p = takeOpt(args, "--file", "--file"))
+        out.push_back(*p);
+    return out;
+}
+
+// Uploads the files at `paths`, after checking them all (so a bad one
+// doesn't leave the others half done).
+std::vector<AttachmentItem> uploadFiles(Api &api, const std::vector<std::string> &paths)
+{
+    for (const auto &p : paths)
+    {
+        std::ifstream in(p, std::ios::binary | std::ios::ate);
+        if (!in)
+            throw UsageError("can't read " + p);
+        if (attach::sniff(p).empty())
+            throw UsageError(p + " isn't an image (PNG, JPEG, GIF, WebP) or a PDF");
+        if (static_cast<int64_t>(in.tellg()) > attach::kMaxSize)
+            throw UsageError(p + " is over 10 MB, the most the server takes");
+    }
+    std::vector<AttachmentItem> out;
+    for (const auto &p : paths)
+        out.push_back(api.upload(p));
+    return out;
+}
+
+// "f1a2b3c4d5e6" (as shown) or "1a2b3c4d5e6": the id the server knows.
+std::string fileId(const std::string &ref)
+{
+    std::string id = CategoryTree::lower(ref);
+    if (id.size() == 13 && id[0] == 'f')
+        id = id.substr(1);
+    if (id.size() != 12 || id.find_first_not_of("0123456789abcdef") != std::string::npos)
+        throw UsageError("invalid file id '" + ref + "' (they look like f1a2b3c4d5e6)");
+    return id;
+}
+
+// Downloads `a` to `out` (a file, or a folder to put it in), else to its
+// name in the current folder, numbered if that's taken. Prints the path.
+void saveAttachment(Api &api, const AttachmentItem &a, const std::optional<std::string> &out)
+{
+    namespace fs = std::filesystem;
+    const std::string name = attach::baseName(a.name).empty() ? a.label() : attach::baseName(a.name);
+    fs::path path = out ? fs::path(*out) : fs::path(name);
+    std::error_code ec;
+    if (out && fs::is_directory(path, ec))
+        path /= name;
+    else if (!out)
+        for (int n = 1; fs::exists(path, ec); ++n)
+            path = fs::path(name).stem().string() + "-" + std::to_string(n) +
+                   fs::path(name).extension().string();
+    const std::string data = api.download(a.id);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    f.write(data.data(), static_cast<std::streamsize>(data.size()));
+    if (!f)
+        throw UsageError("can't write " + path.string());
+    std::cout << path.string() << "\n";
+}
+
 // [#12] 14:03 alice: text  (events: [#13] 14:05 alice claimed #3 ...; pruned: [p4])
+// Attachments follow the text, one per line: [image: shot.png 800x600, f1a2...].
 void printMessage(const MessageItem &m, int indent = 0)
 {
     const std::string label = (m.prunedAt ? "[p" : "[#") + std::to_string(m.id) + "] ";
@@ -385,6 +467,11 @@ void printMessage(const MessageItem &m, int indent = 0)
                           : kind == rooms::Mention::Other ? c("1;36", part)
                                                           : part);
         std::cout << "\n";
+    }
+    for (const auto &a : m.attachments)
+    {
+        std::cout << (first ? "" : std::string(indent + 4, ' ')) << c("36", a.marker()) << "\n";
+        first = false;
     }
 }
 
@@ -483,8 +570,10 @@ int cmdAdd(Api &api, std::vector<std::string> args)
     auto roomRef = takeOpt(args, "-r", "--room");
     auto [priority, deadline] = takeExtras(args);
     auto description = takeOpt(args, "-m", "--desc");
+    const auto paths = takeFiles(args);
     if (args.size() < 2)
-        throw UsageError("usage: todo add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] <title...>");
+        throw UsageError("usage: todo add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] "
+                         "[--file PATH...] <title...>");
     const int64_t roomId = roomRef ? resolveRoom(api, *roomRef).id : 0;
     int64_t catId = 0;
     CategoryTree tree;
@@ -493,8 +582,11 @@ int cmdAdd(Api &api, std::vector<std::string> args)
         tree = api.categories();
         catId = resolveCategory(tree, *catPath);
     }
+    const auto files = uploadFiles(api, paths);
     auto t = api.add(joinArgs(args, 1), catId, priority.value_or(0), deadline.value_or(""),
                      description.value_or(""), roomId);
+    if (!files.empty())
+        t = api.setAttachments(t.id, files);
     std::cout << "Added ";
     printTodo(t);
     if (catId)
@@ -856,7 +948,8 @@ int cmdRoom(Api &api, std::vector<std::string> args)
 
     if (sub == "say" || sub == "post")
     {
-        need(4, "say <ROOM> <TEXT...|->");
+        const auto paths = takeFiles(args);
+        need(paths.empty() ? 4 : 3, "say <ROOM> [--file PATH...] <TEXT...|->");
         const auto room = resolveRoom(api, args[2]);
         std::string text = joinArgs(args, 3);
         if (text == "-")
@@ -865,8 +958,24 @@ int cmdRoom(Api &api, std::vector<std::string> args)
             in << std::cin.rdbuf();
             text = in.str();
         }
-        printMessage(api.post(room.id, text));
+        printMessage(api.post(room.id, text, uploadFiles(api, paths)));
         return 0;
+    }
+
+    if (sub == "get")
+    {
+        auto out = takeOpt(args, "-o", "--output");
+        need(4, "get <ROOM> <FILE-ID> [-o PATH]");
+        const auto room = resolveRoom(api, args[2]);
+        const auto id = fileId(args[3]);
+        auto msgs = api.messages(room.id, 0, 1000);
+        const auto prunedMsgs = api.prunedMessages(room.id);
+        msgs.insert(msgs.end(), prunedMsgs.begin(), prunedMsgs.end());
+        for (const auto &m : msgs)
+            for (const auto &a : m.attachments)
+                if (a.id == id)
+                    return saveAttachment(api, a, out), 0;
+        throw UsageError("no file f" + id + " in " + room.name + " (see: todo room read " + room.name + ")");
     }
 
     if (sub == "read")
@@ -979,8 +1088,8 @@ int cmdRoom(Api &api, std::vector<std::string> args)
     }
 
     throw UsageError("unknown `todo room` command '" + sub +
-                     "' (try: ls, add, topic, rename, rm, show, say, read, wait, prune, pruned, "
-                     "restore, purge)");
+                     "' (try: ls, add, topic, rename, rm, show, say, get, read, wait, prune, "
+                     "pruned, restore, purge)");
 }
 
 int run(Api &api, const std::vector<std::string> &args)
@@ -1053,6 +1162,8 @@ int run(Api &api, const std::vector<std::string> &args)
                     std::cout << (t.description.empty() ? c("2", "  (no description)")
                                                          : t.description)
                               << "\n";
+                    for (const auto &a : t.attachments)
+                        std::cout << c("36", a.marker()) << "\n";
                     return 0;
                 }
             throw UsageError("no todo #" + std::to_string(id));
@@ -1078,12 +1189,19 @@ int run(Api &api, const std::vector<std::string> &args)
         auto rest = args;
         auto [priority, deadline] = takeExtras(rest);
         auto roomRef = takeOpt(rest, "-r", "--room");
-        if (rest.size() < 2 || (!priority && !deadline && !roomRef))
-            throw UsageError(
-                "usage: todo set <id...> [-p PRI] [-d DUE] [-r ROOM]   (\"none\" clears each)");
+        auto paths = takeFiles(rest);
+        if (rest.size() < 2 || (!priority && !deadline && !roomRef && paths.empty()))
+            throw UsageError("usage: todo set <id...> [-p PRI] [-d DUE] [-r ROOM] [--file PATH...]"
+                             "   (\"none\" clears each)");
         std::optional<int64_t> roomId;
         if (roomRef)
             roomId = *roomRef == "none" || *roomRef == "-" ? 0 : resolveRoom(api, *roomRef).id;
+        const bool clearFiles = paths.size() == 1 && paths[0] == "none";
+        const auto files = clearFiles ? std::vector<AttachmentItem>{} : uploadFiles(api, paths);
+        std::map<int64_t, TodoItem> current;
+        if (!paths.empty())
+            for (const auto &t : api.list("all", true))
+                current[t.id] = t;
         for (size_t i = 1; i < rest.size(); ++i)
         {
             const auto id = parseId(rest[i]);
@@ -1092,9 +1210,37 @@ int run(Api &api, const std::vector<std::string> &args)
                 t = api.setExtras(id, priority, deadline);
             if (roomId)
                 t = api.setRoom(id, *roomId);
+            if (!paths.empty())
+            {
+                // New files go after the ones it has (the same file only once).
+                auto list = clearFiles ? std::vector<AttachmentItem>{} : current[id].attachments;
+                for (const auto &f : files)
+                    if (std::none_of(list.begin(), list.end(), [&](auto &a) { return a.id == f.id; }))
+                        list.push_back(f);
+                t = api.setAttachments(id, list);
+            }
             printTodo(t);
+            for (const auto &a : paths.empty() ? std::vector<AttachmentItem>{} : t.attachments)
+                std::cout << "      " << c("36", a.marker()) << "\n";
         }
         return 0;
+    }
+
+    if (cmd == "get")
+    {
+        auto rest = args;
+        auto out = takeOpt(rest, "-o", "--output");
+        if (rest.size() != 2)
+            throw UsageError("usage: todo get <FILE-ID> [-o PATH]   (a room's: todo room get)");
+        const auto id = fileId(rest[1]);
+        auto todos = api.list("all", true);
+        const auto prunedTodos = api.listPruned();
+        todos.insert(todos.end(), prunedTodos.begin(), prunedTodos.end());
+        for (const auto &t : todos)
+            for (const auto &a : t.attachments)
+                if (a.id == id)
+                    return saveAttachment(api, a, out), 0;
+        throw UsageError("no todo has file f" + id + " (a message's? todo room get ROOM f" + id + ")");
     }
 
     if (cmd == "edit")
