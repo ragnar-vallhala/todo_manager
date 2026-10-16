@@ -96,14 +96,21 @@ struct Room
     int64_t createdAt{0};
     // Agent name -> unix seconds it last posted, claimed or read here.
     std::map<std::string, int64_t> members;
+    // Goes up whenever messages leave or rejoin the log (prune, restore),
+    // so clients holding a copy know to load it again.
+    int64_t logVersion{0};
 
     Json::Value toJson() const;
 };
 
-// Ids are global and only grow, so "messages after id N" works as a cursor.
+// Like todos, a message takes the lowest id free in its room, and pruning
+// moves it aside (with a pN id), freeing its id. Logs are ordered by `seq`,
+// which only grows (one counter for every room), so "messages after seq N"
+// works as a cursor.
 struct Message
 {
     int64_t id{0};
+    int64_t seq{0};
     int64_t roomId{0};
     std::string author;  // "" for the server
     std::string text;
@@ -112,6 +119,7 @@ struct Message
     // when a room todo changes (added, claimed, done...), naming that todo.
     std::string kind{"message"};
     int64_t todoId{0};
+    int64_t prunedAt{0};  // unix seconds it was pruned; 0 in the live log
 
     Json::Value toJson() const;
 };
@@ -182,10 +190,22 @@ class TodoStore
     // Drops `name` from the room's members (they rejoin if they show up again).
     Room removeMember(int64_t id, const std::string &name);
     Message post(int64_t roomId, const std::string &author, const std::string &text);
-    // Messages with ids above `since`, oldest first, at most `limit` (the
+    // Messages with seq above `since`, oldest first, at most `limit` (the
     // newest ones if there are more). since 0 = from the start.
     std::vector<Message> messages(int64_t roomId, int64_t since, size_t limit) const;
-    int64_t lastMessageId(int64_t roomId) const;
+    // The newest message's seq, the cursor to read or wait after; 0 if none.
+    int64_t cursor(int64_t roomId) const;
+
+    // Pruned messages leave the log but are kept, with ids pN of their own,
+    // until restored or removed. 404 if the room or message doesn't exist.
+    Message pruneMessage(int64_t roomId, int64_t id);
+    // Prunes all but the newest `keep` messages; returns how many.
+    size_t pruneMessages(int64_t roomId, size_t keep);
+    std::vector<Message> listPrunedMessages(int64_t roomId) const;  // oldest first
+    size_t prunedMessageCount(int64_t roomId) const;
+    Message restoreMessage(int64_t roomId, int64_t prunedId);  // back, with a free id
+    bool removePrunedMessage(int64_t roomId, int64_t prunedId);
+    size_t clearPrunedMessages(int64_t roomId);
     // Notes that `agent` looked at the room (kept in memory until the next save).
     void touch(int64_t roomId, const std::string &agent);
 
@@ -207,6 +227,8 @@ class TodoStore
     Room *findRoomById(int64_t id);
     void checkRoomExists(int64_t id);
     void checkRoomName(const std::string &name, int64_t selfId);
+    // Moves a live message to the pruned list; callers save.
+    void pruneAt(std::vector<Message>::iterator it, int64_t now);
     // Appends a message (and marks `author` as a member); callers save.
     const Message &append(int64_t roomId, const std::string &author, const std::string &text,
                           const std::string &kind, int64_t todoId);
@@ -219,9 +241,10 @@ class TodoStore
     std::vector<Category> categories_;
     std::vector<Todo> pruned_;
     std::vector<Room> rooms_;
-    std::vector<Message> messages_;
+    std::vector<Message> messages_;        // by seq
+    std::vector<Message> prunedMessages_;  // by seq
     int64_t nextCategoryId_{1};
     int64_t nextRoomId_{1};
-    int64_t nextMessageId_{1};
+    int64_t nextSeq_{1};
     std::function<void(int64_t)> listener_;
 };

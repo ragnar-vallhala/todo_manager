@@ -22,7 +22,7 @@ let showDone = false;
 let showArchive = false;  // the sidebar's Archived section is unfolded
 let collapsed = new Set();
 let me = 'human';         // your name in rooms
-let lastRead = {};        // room id -> the newest message id you've seen there
+let lastRead = {};        // room id -> the newest message seq you've seen there
 
 try {
   showDone = localStorage.getItem('showDone') === '1';
@@ -182,7 +182,7 @@ function flatten(parentId = null, depth = 0, out = [], skipCollapsed = false) {
 const isRoom = (v = view) => typeof v === 'string' && v.startsWith(ROOM);
 const roomIdOf = (v = view) => (isRoom(v) ? Number(v.slice(ROOM.length)) : null);
 const findRoom = (id) => rooms.find((r) => r.id === id);
-const unread = (r) => r.lastMessageId > (lastRead[r.id] || 0);
+const unread = (r) => r.cursor > (lastRead[r.id] || 0);
 
 // "just now", "5m ago", "3h ago", "2d ago".
 function ago(seconds) {
@@ -1107,8 +1107,13 @@ menu.addEventListener('click', async (e) => {
 
 // ── Room view: topic, members, message log ──
 
+// Messages are ordered by `seq`, which only grows; their `id`s are reused
+// once pruned, so they say nothing about order.
 let log = { roomId: null, messages: [] };  // the open room's messages, oldest first
-let poll = null;                           // { roomId, ctl: AbortController }
+let poll = null;                           // { roomId, version, ctl: AbortController }
+// The open room's pruned messages, when showing them instead of the log.
+// `key` notes what they were loaded for, to load them again when it changes.
+let prunedLog = { on: false, roomId: null, key: null, messages: [] };
 
 // Asks for multi-line text; resolves with it (maybe empty), or undefined if cancelled.
 function promptText(title, value, confirmLabel, placeholder) {
@@ -1151,6 +1156,14 @@ async function roomAction(action) {
       await fetchAll();
     });
   }
+  if (action === 'room-prune') {
+    const keep = await promptPrune(room);
+    if (keep === undefined) return;
+    return run(async () => {
+      await api('POST', `/rooms/${room.id}/messages/prune`, { keep });
+      await fetchAll();
+    });
+  }
   if (action === 'room-delete') {
     const ok = await confirmDialog(`Delete ${room.name}?`,
       'Its messages are deleted. Its todos stay, just not in a room.', 'Delete room');
@@ -1161,6 +1174,25 @@ async function roomAction(action) {
       go(ALL);
     });
   }
+}
+
+// Asks how many of the newest messages to keep; resolves with that, or
+// undefined if cancelled.
+function promptPrune(room) {
+  return openDialog((close) => {
+    const keep = el('input', { type: 'number', min: 0, value: 0, required: true, className: 'keep' });
+    keep.setAttribute('aria-label', 'Messages to keep');
+    const form = el('form', {},
+      el('p', { textContent: 'They move to Pruned, where you can restore them, and their numbers go to new messages.' }),
+      el('label', { className: 'keep-row' }, 'Keep the newest ', keep, ' messages'),
+      actions(close, 'Prune', { danger: true }));
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      close(Math.max(0, parseInt(keep.value, 10) || 0));
+    });
+    setTimeout(() => keep.select());
+    return [el('h2', { textContent: `Prune messages in ${room.name}?` }), form];
+  });
 }
 
 async function changeName() {
@@ -1233,34 +1265,123 @@ function richText(text) {
   return out;
 }
 
+const ICONS = {
+  prune: '<circle cx="4.5" cy="11.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/><path d="M5.8 10L12 2.5M10.2 10L4 2.5"/>',
+  restore: '<path d="M3.5 8a4.5 4.5 0 1 0 1.3-3.2M4.5 2.5v2.5H7"/>',
+  delete: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
+};
+
+function iconButton(icon, label, onClick) {
+  const b = el('button', { className: 'quiet icon ' + icon, title: label, ariaLabel: label });
+  b.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true">${ICONS[icon]}</svg>`;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+// One message; `tools` are its hover buttons. Its number shows on hover of the time.
+function messageRow(m, tools) {
+  const when = new Date(m.createdAt * 1000);
+  const time = el('time', {
+    className: 'msg-time',
+    textContent: when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+    title: `${m.prunedAt ? 'p' : '#'}${m.id} · ${when.toLocaleString()}`,
+  });
+  const author = el('span', { className: 'msg-author', textContent: m.author ?? 'server' });
+  if (m.author === me) author.classList.add('mine');
+  else if (m.author) author.style.setProperty('--hue', nameHue(m.author));
+  const bar = el('span', { className: 'msg-tools' }, ...tools);
+  if (m.kind === 'event') return el('li', { className: 'msg event' }, author, ' ', el('span', {}, ...richText(m.text)), time, bar);
+  return el('li', { className: 'msg' }, el('div', { className: 'msg-head' }, author, time, bar),
+    el('p', { className: 'msg-text' }, ...richText(m.text)));
+}
+
 function renderLog() {
   const box = $('#room-log');
+  const room = findRoom(roomIdOf());
+  if (prunedLog.roomId !== room?.id) prunedLog = { on: false, roomId: room?.id, key: null, messages: [] };
+  const showPruned = prunedLog.on && room;
+  if (showPruned) loadPruned(room);
+
+  const toggle = $('#log-pruned');
+  const n = room?.prunedMessages || 0;
+  toggle.hidden = !showPruned && !n;
+  toggle.textContent = showPruned ? 'Back to messages' : `${n} pruned`;
+  $('.log-title').textContent = showPruned ? 'Pruned messages' : 'Messages';
+  $('#room-post').hidden = showPruned;
+  $('#log-pruned-bar').hidden = !showPruned || !prunedLog.messages.length;
+  box.classList.toggle('pruned', !!showPruned);
+
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
-  const msgs = log.roomId === roomIdOf() ? log.messages : [];
-  box.replaceChildren(...msgs.map((m) => {
-    const time = el('time', {
-      className: 'msg-time',
-      textContent: new Date(m.createdAt * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
-      title: new Date(m.createdAt * 1000).toLocaleString(),
-    });
-    const author = el('span', { className: 'msg-author', textContent: m.author ?? 'server' });
-    if (m.author === me) author.classList.add('mine');
-    else if (m.author) author.style.setProperty('--hue', nameHue(m.author));
-    if (m.kind === 'event') return el('li', { className: 'msg event' }, author, ' ', el('span', {}, ...richText(m.text)), time);
-    return el('li', { className: 'msg' }, el('div', { className: 'msg-head' }, author, time),
-      el('p', { className: 'msg-text' }, ...richText(m.text)));
-  }));
-  $('#room-log-empty').hidden = msgs.length > 0;
-  if (atBottom || box.dataset.room !== String(log.roomId)) box.scrollTop = box.scrollHeight;
-  box.dataset.room = String(log.roomId);
+  const msgs = showPruned ? prunedLog.messages : log.roomId === roomIdOf() ? log.messages : [];
+  box.replaceChildren(...msgs.map((m) => showPruned
+    ? messageRow(m, [
+      iconButton('restore', 'Restore', () => run(async () => {
+        await api('POST', `/rooms/${room.id}/pruned/${m.id}/restore`);
+        await fetchAll();
+      })),
+      iconButton('delete', 'Delete for good', () => run(async () => {
+        await api('DELETE', `/rooms/${room.id}/pruned/${m.id}`);
+        prunedLog.messages = prunedLog.messages.filter((x) => x !== m);
+        await fetchAll();
+      })),
+    ])
+    : messageRow(m, [
+      iconButton('prune', 'Prune (frees its number)', () => run(async () => {
+        await api('POST', `/rooms/${room.id}/messages/${m.id}/prune`);
+        await fetchAll();
+      })),
+    ])));
+
+  const empty = $('#room-log-empty');
+  empty.hidden = msgs.length > 0;
+  empty.textContent = showPruned
+    ? 'Nothing pruned here.'
+    : "No messages yet. Agents post here, and changes to this room's todos show up too.";
+  const shown = `${log.roomId}:${showPruned ? 'pruned' : 'log'}`;
+  if (atBottom || box.dataset.room !== shown) box.scrollTop = box.scrollHeight;
+  box.dataset.room = shown;
   markRead();
 }
+
+// Loads the room's pruned messages when they've changed since last time.
+async function loadPruned(room) {
+  const key = `${room.logVersion}:${room.prunedMessages}`;
+  if (prunedLog.key === key) return;
+  prunedLog.key = key;
+  try {
+    const msgs = await api('GET', `/rooms/${room.id}/pruned`);
+    if (prunedLog.roomId !== room.id || prunedLog.key !== key) return;
+    prunedLog.messages = msgs;
+    renderLog();
+  } catch (e) {
+    prunedLog.key = null;
+    showError(e);
+  }
+}
+
+$('#log-pruned').addEventListener('click', () => {
+  prunedLog.on = !prunedLog.on;
+  renderLog();
+});
+
+$('#log-purge').addEventListener('click', async () => {
+  const room = findRoom(roomIdOf());
+  if (!room) return;
+  const ok = await confirmDialog('Delete all pruned messages?',
+    `${prunedLog.messages.length} message(s) will be gone for good.`, 'Delete all');
+  if (!ok) return;
+  run(async () => {
+    await api('DELETE', `/rooms/${room.id}/pruned`);
+    prunedLog = { ...prunedLog, on: false, messages: [] };
+    await fetchAll();
+  });
+});
 
 // Messages on screen count as read while the page is visible.
 function markRead() {
   const id = roomIdOf();
   if (id == null || log.roomId !== id || document.hidden || !log.messages.length) return;
-  const last = log.messages[log.messages.length - 1].id;
+  const last = log.messages[log.messages.length - 1].seq;
   if ((lastRead[id] || 0) >= last) return;
   lastRead[id] = last;
   remember();
@@ -1268,24 +1389,29 @@ function markRead() {
 
 // Adds messages (skipping ones already there); true if any were events.
 function addMessages(msgs) {
-  const have = new Set(log.messages.map((m) => m.id));
-  const fresh = msgs.filter((m) => !have.has(m.id));
+  const have = new Set(log.messages.map((m) => m.seq));
+  const fresh = msgs.filter((m) => !have.has(m.seq));
   log.messages.push(...fresh);
-  log.messages.sort((a, b) => a.id - b.id);
+  log.messages.sort((a, b) => a.seq - b.seq);
   const room = findRoom(log.roomId);
-  if (room && fresh.length) room.lastMessageId = Math.max(room.lastMessageId, ...fresh.map((m) => m.id));
+  if (room && fresh.length) room.cursor = Math.max(room.cursor, ...fresh.map((m) => m.seq));
   return fresh.some((m) => m.kind === 'event');
 }
 
 // Keeps one long poll running for the open room: it loads the recent
-// messages, then waits for new ones until you leave the room.
+// messages, then waits for new ones until you leave the room. Starts over
+// when the room's logVersion changes (messages were pruned or restored).
 function syncPoll() {
   const id = roomIdOf();
-  if (poll?.roomId === id) return;
+  const version = findRoom(id)?.logVersion;
+  if (poll?.roomId === id) {
+    poll.version ??= version;
+    if (version == null || poll.version === version) return;
+  }
   poll?.ctl.abort();
   poll = null;
   if (id == null) return;
-  poll = { roomId: id, ctl: new AbortController() };
+  poll = { roomId: id, version, ctl: new AbortController() };
   if (log.roomId !== id) log = { roomId: id, messages: [] };
   pollLoop(poll);
 }
@@ -1295,13 +1421,15 @@ async function pollLoop(p) {
   const agent = encodeURIComponent(me);
   let delay = 1000;
   try {
-    addMessages(await api('GET', `/rooms/${p.roomId}/messages?limit=200&agent=${agent}`, null, { signal }));
+    const msgs = await api('GET', `/rooms/${p.roomId}/messages?limit=200&agent=${agent}`, null, { signal });
+    log = { roomId: p.roomId, messages: [] };  // replaces what was there, pruned ones and all
+    addMessages(msgs);
     renderLog();
   } catch (e) {
     if (signal.aborted) return;
   }
   while (!signal.aborted) {
-    const since = log.messages.length ? log.messages[log.messages.length - 1].id : 0;
+    const since = log.messages.length ? log.messages[log.messages.length - 1].seq : 0;
     try {
       const msgs = await api('GET', `/rooms/${p.roomId}/messages?since=${since}&wait=25&agent=${agent}`, null, { signal });
       delay = 1000;

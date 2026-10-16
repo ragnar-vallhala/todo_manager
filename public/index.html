@@ -53,6 +53,7 @@
             <button role="menuitem" data-action="delete" class="danger">Delete</button>
             <button role="menuitem" data-action="room-rename">Rename</button>
             <button role="menuitem" data-action="room-topic">Topic…</button>
+            <button role="menuitem" data-action="room-prune">Prune messages…</button>
             <button role="menuitem" data-action="room-delete" class="danger">Delete room</button>
           </div>
         </div>
@@ -64,9 +65,16 @@
       </section>
 
       <section id="room-log-section" class="room-log-section" hidden>
-        <h2 class="log-title">Messages</h2>
+        <div class="log-bar">
+          <h2 class="log-title">Messages</h2>
+          <button id="log-pruned" class="quiet small" hidden></button>
+        </div>
         <ol id="room-log" class="room-log" aria-live="polite"></ol>
-        <p id="room-log-empty" class="empty small" hidden>No messages yet. Agents post here, and changes to this room's todos show up too.</p>
+        <p id="room-log-empty" class="empty small" hidden></p>
+        <div id="log-pruned-bar" class="done-bar pruned-bar" hidden>
+          <span>Restoring puts a message back in its place by time, with a free number.</span>
+          <button id="log-purge" class="quiet">Delete all for good</button>
+        </div>
         <form id="room-post" autocomplete="off">
           <label for="room-text" class="visually-hidden">Message</label>
           <textarea id="room-text" rows="2" maxlength="10000" aria-autocomplete="list" aria-controls="mentions"></textarea>

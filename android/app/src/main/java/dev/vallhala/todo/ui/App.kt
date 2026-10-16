@@ -93,6 +93,8 @@ private sealed interface Dialog {
     data class EditRoom(val id: Int) : Dialog
     data class DeleteRoom(val id: Int) : Dialog
     data object DeleteAllPruned : Dialog
+    data class PruneMessages(val roomId: Int) : Dialog
+    data class DeleteAllPrunedMessages(val roomId: Int) : Dialog
     data object Theme : Dialog
     data object Settings : Dialog
 }
@@ -198,6 +200,15 @@ fun App(model: AppModel) {
         Dialog.DeleteAllPruned -> Confirm("Delete all pruned todos?", "They can't be restored afterwards.", "Delete all", close) {
             close(); model.deleteAllPruned()
         }
+        is Dialog.PruneMessages -> Confirm(
+            "Prune the messages in “${model.room(d.roomId)?.name}”?",
+            "They move to the room's Pruned tab, freeing their ids; you can restore them from there.",
+            "Prune", close,
+        ) { close(); model.pruneMessages(d.roomId) }
+        is Dialog.DeleteAllPrunedMessages -> Confirm(
+            "Delete the pruned messages in “${model.room(d.roomId)?.name}”?",
+            "They can't be restored afterwards.", "Delete all", close,
+        ) { close(); model.deleteAllPrunedMessages(d.roomId) }
         Dialog.Theme -> ThemeDialog(model.themes, model.themeName, close) { model.setTheme(it) }
         Dialog.Settings -> SettingsDialog(model, first = false, onDismiss = close)
     }
@@ -234,6 +245,8 @@ private fun Overflow(model: AppModel, open: (Dialog) -> Unit) {
             }
             is View.RoomView -> {
                 item("Edit room") { open(Dialog.EditRoom(v.id)) }
+                item("Prune messages") { open(Dialog.PruneMessages(v.id)) }
+                if ((model.room(v.id)?.prunedMessages ?: 0) > 0) item("Delete pruned messages") { open(Dialog.DeleteAllPrunedMessages(v.id)) }
                 item("Delete room") { open(Dialog.DeleteRoom(v.id)) }
                 HorizontalDivider()
             }

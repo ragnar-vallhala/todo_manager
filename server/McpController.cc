@@ -122,9 +122,9 @@ Json::Value toolList()
     tools.append(tool(
         "read_room",
         "Read a room: topic, members, its todos (with who claimed them) and messages after "
-        "`since`. Returns `cursor`, the id to pass as `since` next time.",
+        "`since`. Returns `cursor`, the value to pass as `since` next time.",
         {{"room", roomProp()},
-         {"since", prop("integer", "Only messages after this id. Omit for the latest ones.")},
+         {"since", prop("integer", "A cursor: only messages after it. Omit for the latest ones.")},
          {"limit", prop("integer", "At most this many messages (default 50)")}},
         {"room"}));
     tools.append(tool(
@@ -213,7 +213,7 @@ Json::Value messagesJson(const std::vector<Message> &msgs, int64_t since)
     for (const auto &m : msgs)
     {
         out["messages"].append(m.toJson());
-        cursor = std::max(cursor, m.id);
+        cursor = std::max(cursor, m.seq);
     }
     out["cursor"] = static_cast<Json::Int64>(cursor);
     return out;
@@ -269,7 +269,7 @@ void callTool(const std::string &name, const Json::Value &args, const std::strin
         out["todos"] = roomTodos(r.id);
         auto msgs = messagesJson(store.messages(r.id, since, limit), since);
         out["messages"] = msgs["messages"];
-        out["cursor"] = std::max(msgs["cursor"].asInt64(), out["lastMessageId"].asInt64());
+        out["cursor"] = std::max(msgs["cursor"].asInt64(), out["cursor"].asInt64());
         if (!agent.empty())
             out["you"] = agent;
         return done(toolJson(out));

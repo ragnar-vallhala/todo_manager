@@ -25,11 +25,13 @@ inline std::string checkName(const std::string &name)
     return "";
 }
 
-// A room plus its newest message id, the cursor to read or wait after.
+// A room plus its cursor (the newest message's seq, to read or wait after)
+// and how many of its messages are pruned.
 inline Json::Value roomJson(const Room &r)
 {
     Json::Value v = r.toJson();
-    v["lastMessageId"] = static_cast<Json::Int64>(TodoStore::get().lastMessageId(r.id));
+    v["cursor"] = static_cast<Json::Int64>(TodoStore::get().cursor(r.id));
+    v["prunedMessages"] = static_cast<Json::UInt64>(TodoStore::get().prunedMessageCount(r.id));
     return v;
 }
 }  // namespace rooms

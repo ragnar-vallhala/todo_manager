@@ -332,8 +332,10 @@ termios gOrigTermios;
 volatile sig_atomic_t gRawMode = 0;
 volatile sig_atomic_t gResized = 0;
 
-constexpr char kEnterScreen[] = "\033[?1049h\033[?25l\033[?7l";
-constexpr char kLeaveScreen[] = "\033[0m\033[?7h\033[?25h\033[?1049l";
+// "\033[>1u" asks terminals that support it to report keys unambiguously (the
+// kitty protocol), so Shift+Enter is told apart from Enter; others ignore it.
+constexpr char kEnterScreen[] = "\033[?1049h\033[?25l\033[?7l\033[>1u";
+constexpr char kLeaveScreen[] = "\033[<u\033[0m\033[?7h\033[?25h\033[?1049l";
 
 void restoreTerminal()
 {
@@ -462,6 +464,13 @@ class Terminal
             {
                 // Alt+x arrives as Esc, x.
                 const unsigned char c = buf_[1];
+                if (c == '\r')
+                {
+                    buf_.erase(0, 2);
+                    Key k{Key::Enter};
+                    k.mods = Key::Alt;
+                    return k;
+                }
                 if (c < 0x20 || c == 0x7F)
                     return take(1, Key::Esc);
                 buf_.erase(0, 1);
@@ -512,6 +521,10 @@ class Terminal
                         case 3: return key(Key::Del);
                         case 5: return key(Key::PgUp);
                         case 6: return key(Key::PgDn);
+                        case 27:  // xterm's modifyOtherKeys: "CSI 27;mods;code ~"
+                            if (std::atoi(params.c_str() + params.rfind(';') + 1) == 13)
+                                return key(Key::Enter);
+                            break;
                     }
                     break;
                 case 'u':  // "CSI code;mods u", from terminals that report every key
@@ -541,8 +554,14 @@ class Terminal
             }
             return {};  // unknown sequence: ignore
         }
-        if (b == '\r' || b == '\n')
+        if (b == '\r')
             return take(1, Key::Enter);
+        if (b == '\n')  // Ctrl+J, now that Enter sends \r
+        {
+            Key k = take(1, Key::Enter);
+            k.mods = Key::CtrlMod;
+            return k;
+        }
         if (b == 0x7F || b == 0x08)
             return take(1, Key::Backspace);
         if (b == '\t')
@@ -602,22 +621,36 @@ class LineEdit
                 return true;
             case Key::Left: cur_ -= cur_ > 0; return true;
             case Key::Right: cur_ += cur_ < chars_.size(); return true;
-            case Key::Home: cur_ = 0; return true;
-            case Key::End: cur_ = chars_.size(); return true;
+            case Key::Home: cur_ = lineStart(); return true;
+            case Key::End: cur_ = lineEnd(); return true;
+            case Key::Up:
+            case Key::Down:
+            {
+                // To the same column of the line above / below, if there is one.
+                const size_t col = cur_ - lineStart();
+                if (k.type == Key::Up ? lineStart() == 0 : lineEnd() == chars_.size())
+                    return false;
+                cur_ = k.type == Key::Up ? lineStart() - 1 : lineEnd() + 1;
+                cur_ = std::min(lineStart() + col, lineEnd());
+                return true;
+            }
             case Key::Ctrl:
                 switch (k.ch[0])
                 {
-                    case 'a': cur_ = 0; return true;
-                    case 'e': cur_ = chars_.size(); return true;
+                    case 'a': cur_ = lineStart(); return true;
+                    case 'e': cur_ = lineEnd(); return true;
                     case 'u':
-                        chars_.erase(chars_.begin(), chars_.begin() + cur_);
-                        cur_ = 0;
+                    {
+                        const size_t b = lineStart();
+                        chars_.erase(chars_.begin() + b, chars_.begin() + cur_);
+                        cur_ = b;
                         return true;
-                    case 'k': chars_.erase(chars_.begin() + cur_, chars_.end()); return true;
+                    }
+                    case 'k': chars_.erase(chars_.begin() + cur_, chars_.begin() + lineEnd()); return true;
                     case 'w':
                         while (cur_ > 0 && chars_[cur_ - 1] == " ")
                             chars_.erase(chars_.begin() + --cur_);
-                        while (cur_ > 0 && chars_[cur_ - 1] != " ")
+                        while (cur_ > 0 && !isSpace(chars_[cur_ - 1]))
                             chars_.erase(chars_.begin() + --cur_);
                         return true;
                 }
@@ -626,11 +659,13 @@ class LineEdit
         }
     }
 
+    void newline() { chars_.insert(chars_.begin() + cur_++, "\n"); }
+
     // The word the cursor is at the end of ("" after a space).
     std::string wordBeforeCursor() const
     {
         size_t b = cur_;
-        while (b > 0 && chars_[b - 1] != " ")
+        while (b > 0 && !isSpace(chars_[b - 1]))
             --b;
         std::string w;
         for (size_t i = b; i < cur_; ++i)
@@ -642,7 +677,7 @@ class LineEdit
     void replaceWordBeforeCursor(const std::string &word)
     {
         size_t b = cur_;
-        while (b > 0 && chars_[b - 1] != " ")
+        while (b > 0 && !isSpace(chars_[b - 1]))
             --b;
         chars_.erase(chars_.begin() + b, chars_.begin() + cur_);
         auto add = splitUtf8(word);
@@ -666,7 +701,83 @@ class LineEdit
         return x + before;
     }
 
+    // Multi-line text wrapped to `width` columns: how many rows it takes.
+    int rows(int width) const { return static_cast<int>(layout(width).rows.size()); }
+
+    // Draws at most `height` rows of it at (x, y), scrolled so the cursor
+    // is visible. Returns the cursor's screen column and row.
+    std::pair<int, int> drawWrapped(Canvas &c, int x, int y, int width, int height, Style st) const
+    {
+        const Layout l = layout(width);
+        const int top = std::max(0, l.curRow - height + 1);
+        for (int r = 0; r < height && top + r < static_cast<int>(l.rows.size()); ++r)
+        {
+            const auto [from, to] = l.rows[top + r];
+            int cx = x;
+            for (size_t i = from; i < to; ++i)
+                cx = c.text(cx, y + r, chars_[i], st, x + width);
+        }
+        return {x + l.curCol, y + l.curRow - top};
+    }
+
   private:
+    static bool isSpace(const std::string &g) { return g == " " || g == "\n"; }
+
+    size_t lineStart() const
+    {
+        size_t b = cur_;
+        while (b > 0 && chars_[b - 1] != "\n")
+            --b;
+        return b;
+    }
+
+    size_t lineEnd() const
+    {
+        size_t e = cur_;
+        while (e < chars_.size() && chars_[e] != "\n")
+            ++e;
+        return e;
+    }
+
+    struct Layout
+    {
+        std::vector<std::pair<size_t, size_t>> rows;  // [from, to) in chars_
+        int curRow{0}, curCol{0};
+    };
+
+    // Breaks at newlines, and at the width (keeping a column for the cursor).
+    Layout layout(int width) const
+    {
+        Layout l;
+        size_t from = 0;
+        int col = 0;
+        for (size_t i = 0; i <= chars_.size(); ++i)
+        {
+            const bool end = i == chars_.size() || chars_[i] == "\n";
+            const int cw = end ? 0 : charWidth(chars_[i]);
+            if (!end && col + cw > width - 1 && i > from)
+            {
+                l.rows.push_back({from, i});
+                from = i;
+                col = 0;
+            }
+            if (i == cur_)
+            {
+                l.curRow = static_cast<int>(l.rows.size());
+                l.curCol = col;
+            }
+            if (end)
+            {
+                l.rows.push_back({from, i});
+                from = i + 1;
+                col = 0;
+            }
+            else
+                col += cw;
+        }
+        return l;
+    }
+
     std::vector<std::string> chars_;
     size_t cur_{0};
 };
@@ -695,6 +806,7 @@ enum class Mode
     ConfirmDeleteTodo,
     ConfirmDeleteCategory,
     ConfirmDeleteRoom,
+    ConfirmPruneLog,
     ConfirmClear,
     Help,
 };
@@ -814,7 +926,8 @@ class App
     }
 
     // Loads the log of the room being viewed: all of it (the last 200) when
-    // it's a different room, else what's new since last time.
+    // it's a different room or messages were pruned or restored, else what's
+    // new since last time.
     void refreshLog()
     {
         const int64_t room = roomOf(catSelId_);
@@ -824,14 +937,17 @@ class App
             logRoom_ = 0;
             return;
         }
-        if (room != logRoom_)
+        const RoomItem *r = findRoom(room);
+        const int64_t version = r ? r->logVersion : 0;
+        if (room != logRoom_ || version != logVersion_)
         {
             log_ = api_.messages(room, 0, 200);
+            logFollow_ = logFollow_ || room != logRoom_;
             logRoom_ = room;
-            logFollow_ = true;
+            logVersion_ = version;
             return;
         }
-        auto more = api_.messages(room, log_.empty() ? 0 : log_.back().id, 200);
+        auto more = api_.messages(room, log_.empty() ? 0 : log_.back().seq, 200);
         log_.insert(log_.end(), more.begin(), more.end());
         if (log_.size() > 500)
             log_.erase(log_.begin(), log_.end() - 500);
@@ -1298,6 +1414,7 @@ class App
             case Mode::ConfirmDeleteTodo:
             case Mode::ConfirmDeleteCategory:
             case Mode::ConfirmDeleteRoom:
+            case Mode::ConfirmPruneLog:
             case Mode::ConfirmClear: handleConfirm(k); break;
         }
     }
@@ -1463,7 +1580,7 @@ class App
         }
     }
 
-    // The category keys on the Rooms rows: add, rename, delete and topic.
+    // The category keys on the Rooms rows: add, rename, delete, topic and prune.
     // Returns false for keys that work as usual there (moving, folding...).
     bool handleRoomKeys(const Key &k)
     {
@@ -1478,6 +1595,8 @@ class App
             room ? startInput(Mode::RoomTopic, room->topic) : needRoom();
         else if (on("cat_delete"))
             room ? void(mode_ = Mode::ConfirmDeleteRoom) : needRoom();
+        else if (on("room_prune"))
+            room ? void(mode_ = Mode::ConfirmPruneLog) : needRoom();
         else if (on("cat_move") || on("cat_archive"))
             flash("Rooms can't be moved or archived", true);
         else
@@ -1772,7 +1891,7 @@ class App
         mentionSel_ = std::clamp(mentionSel_, 0, n - 1);
         if (k.type == Key::Down || k.type == Key::BackTab || k.type == Key::Up)
             mentionSel_ = (mentionSel_ + (k.type == Key::Down ? 1 : -1) + n) % n;
-        else if (k.type == Key::Tab || k.type == Key::Enter)
+        else if (k.type == Key::Tab || (k.type == Key::Enter && !k.mods))
         {
             input_.replaceWordBeforeCursor("@" + matches[mentionSel_] + " ");
             mentionSel_ = 0;
@@ -1787,6 +1906,11 @@ class App
         if (k.type == Key::Esc)
         {
             mode_ = Mode::Normal;
+            return;
+        }
+        if (k.type == Key::Enter && k.mods && mode_ == Mode::PostMessage)
+        {
+            input_.newline();  // Shift / Alt / Ctrl+Enter: a new line in the message
             return;
         }
         if (k.type != Key::Enter)
@@ -1921,7 +2045,7 @@ class App
             case Mode::PostMessage:
             {
                 const int64_t room = sayRoom_;
-                ok = act([&] { api_.post(room, input_.text()); });
+                ok = act([&] { api_.post(room, text); });
                 logFollow_ = true;
                 break;
             }
@@ -1990,6 +2114,14 @@ class App
                 flash("Deleted room " + name, false);
                 selectCategory(kRooms);
             }
+        }
+        else if (mode_ == Mode::ConfirmPruneLog)
+        {
+            const int64_t room = roomOf(catSelId_);
+            act([&] {
+                const auto n = api_.pruneMessages(room, 0);
+                flash("Pruned " + std::to_string(n) + " message(s); their ids are free again", false);
+            });
         }
         else if (mode_ == Mode::ConfirmDeleteCategory)
         {
@@ -2096,11 +2228,12 @@ class App
                 case Mode::SetDeadline:
                 case Mode::AddRoom:
                 case Mode::RenameRoom:
-                case Mode::RoomTopic:
-                case Mode::PostMessage: drawInputPopup(W, H, cx, cy); break;
+                case Mode::RoomTopic: drawInputPopup(W, H, cx, cy); break;
+                case Mode::PostMessage: drawPostPopup(W, H, cx, cy); break;
                 case Mode::ConfirmDeleteTodo:
                 case Mode::ConfirmDeleteCategory:
                 case Mode::ConfirmDeleteRoom:
+            case Mode::ConfirmPruneLog:
                 case Mode::ConfirmClear: drawConfirmPopup(W, H); break;
                 case Mode::Pick: drawPickPopup(W, H); break;
                 case Mode::Help: drawHelpPopup(W, H); break;
@@ -2566,6 +2699,7 @@ class App
                       {key("cat_style"), "topic"},
                       {key("cat_delete"), "delete"},
                       {key("room_say"), "post"},
+                      {key("room_prune"), "prune log"},
                       {key("new_todo"), "new todo"},
                       {key("help"), "help"},
                       {key("quit"), "quit"}});
@@ -2636,9 +2770,6 @@ class App
             case Mode::AddRoom: title = "New room"; break;
             case Mode::RenameRoom: title = "Rename room " + roomName(roomOf(catSelId_)); break;
             case Mode::RoomTopic: title = "Topic of " + roomName(roomOf(catSelId_)); break;
-            case Mode::PostMessage:
-                title = "Post to " + roomName(sayRoom_) + " as " + api_.agent();
-                break;
             case Mode::EditTodo: title = "Edit #" + std::to_string(editId_); break;
             case Mode::StyleCategory:
                 title = "Style for " + tree_.path(catSelId_) + " (fg=red bg=blue bold italic)";
@@ -2656,12 +2787,20 @@ class App
                             mode_ == Mode::SetDeadline || mode_ == Mode::StyleCategory ||
                                     mode_ == Mode::RoomTopic
                                 ? " empty clears · enter save · esc cancel "
-                            : mode_ == Mode::PostMessage ? " enter post · esc cancel "
-                                                         : " enter save · esc cancel ");
+                                : " enter save · esc cancel ");
         cx = input_.draw(c_, x + 2, y + 1, w - 4, Style());
         cy = y + 1;
-        if (mode_ == Mode::PostMessage)
-            drawMentions(x, y + 3, w, H);
+    }
+
+    // A post can run to several lines; the box grows to show up to 10.
+    void drawPostPopup(int W, int H, int &cx, int &cy)
+    {
+        const int w = std::min(W - 4, 72);
+        const int rows = std::clamp(input_.rows(w - 4), 1, std::max(1, std::min(10, H - 4)));
+        auto [x, y] = popup(W, H, w, rows + 2, "Post to " + roomName(sayRoom_) + " as " + api_.agent(),
+                            " enter post · shift/alt+enter new line · esc cancel ");
+        std::tie(cx, cy) = input_.drawWrapped(c_, x + 2, y + 1, w - 4, rows, Style());
+        drawMentions(x, y + rows + 2, w, H);
     }
 
     // The "@name" suggestions, in a box under the input.
@@ -2706,6 +2845,14 @@ class App
             lines.push_back("Delete room “" + truncate(roomName(roomOf(catSelId_)), w - 20) + "”?");
             lines.push_back("Its messages are deleted.");
             lines.push_back("Its todos stay, outside any room.");
+        }
+        else if (mode_ == Mode::ConfirmPruneLog)
+        {
+            const int64_t room = roomOf(catSelId_);
+            title = "Prune messages";
+            lines.push_back("Prune the messages of “" + truncate(roomName(room), w - 28) + "”?");
+            lines.push_back("Their ids are freed, so new ones start small;");
+            lines.push_back("they're kept: todo room pruned " + truncate(roomName(room), w - 30));
         }
         else if (mode_ == Mode::ConfirmDeleteCategory)
         {
@@ -2826,6 +2973,7 @@ class App
     std::vector<RoomItem> rooms_;
     std::vector<MessageItem> log_;  // the viewed room's latest messages
     int64_t logRoom_{0};            // whose messages log_ holds
+    int64_t logVersion_{0};         // that room's logVersion when log_ was loaded
     int64_t logFor_{0};             // the room the log was last drawn for
     bool logFollow_{true};          // keep the newest message in view
     int64_t sayRoom_{0};            // where PostMessage posts

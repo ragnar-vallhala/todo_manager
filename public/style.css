@@ -694,7 +694,11 @@ dialog .date-row input { flex: 1; width: auto; margin: 0; color-scheme: inherit;
   .room-log-section .room-log { flex: 1; min-height: 0; max-height: none; }
   .room-log-section #room-log-empty { flex: 1; }
 }
-.log-title { margin: 0 0 10px; font-size: 0.8125rem; font-weight: 500; color: var(--muted); }
+.log-bar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+.log-bar #log-pruned { font-size: 0.8125rem; }
+.log-title { margin: 0; font-size: 0.8125rem; font-weight: 500; color: var(--muted); }
+#log-pruned-bar { margin: 0 0 12px; gap: 12px; }
+#log-purge { white-space: nowrap; }
 .room-log {
   list-style: none;
   margin: 0 0 12px;
@@ -744,6 +748,16 @@ dialog .date-row input { flex: 1; width: auto; margin: 0; color-scheme: inherit;
 }
 .msg.event .msg-author { font-size: inherit; font-weight: 500; margin-right: 0.3em; }
 #room-log-empty { margin-bottom: 12px; }
+/* Prune / restore / delete, shown on hover */
+.msg-tools { display: inline-flex; gap: 2px; margin-left: 4px; align-self: center; }
+.msg-tools .icon { width: 20px; height: 20px; opacity: 0; transition: opacity 0.12s, color 0.12s; }
+.msg-tools .icon svg { width: 13px; height: 13px; }
+.msg:hover .msg-tools .icon, .msg:focus-within .msg-tools .icon { opacity: 1; }
+.msg-tools .delete:hover { color: var(--danger); }
+@media (hover: none) { .msg-tools .icon { opacity: 0.6; } }
+.room-log.pruned .msg-text, .room-log.pruned .msg.event { color: var(--muted); }
+.keep-row { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; }
+dialog .keep-row input.keep { width: 5.5em; margin: 0; }
 #room-text {
   width: 100%;
   min-height: 44px;

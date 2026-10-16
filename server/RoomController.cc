@@ -123,7 +123,8 @@ void RoomController::removeMember(const HttpRequestPtr &req, Callback &&cb, int6
     }
 }
 
-// GET /api/rooms/{id}/messages[?since=N][&limit=N][&wait=SECONDS][&agent=NAME]
+// GET /api/rooms/{id}/messages[?since=SEQ][&limit=N][&wait=SECONDS][&agent=NAME]
+// Oldest first. `since` is a cursor: a message's seq, or a room's `cursor`.
 // With `wait`, answers as soon as there's a message after `since`, or with
 // [] once `wait` seconds pass.
 void RoomController::messages(const HttpRequestPtr &req, Callback &&cb, int64_t id)
@@ -183,4 +184,94 @@ void RoomController::post(const HttpRequestPtr &req, Callback &&cb, int64_t id)
     {
         cb(error(e));
     }
+}
+
+// ── Pruned messages ──
+
+// POST /api/rooms/{id}/messages/prune  {"keep"?: N}  -- all but the newest N
+// (default 0); → {"pruned": count}
+void RoomController::pruneAll(const HttpRequestPtr &req, Callback &&cb, int64_t id)
+{
+    auto body = req->getJsonObject();
+    const Json::Value keep = body && body->isObject() ? (*body)["keep"] : Json::Value();
+    if (!keep.isNull() && !(keep.isIntegral() && keep.asInt64() >= 0))
+        return cb(error(400, "keep must be a whole number, 0 or more"));
+    try
+    {
+        Json::Value out;
+        out["pruned"] = static_cast<Json::UInt64>(
+            TodoStore::get().pruneMessages(id, static_cast<size_t>(keep.asInt64())));
+        cb(json(out));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+
+// POST /api/rooms/{id}/messages/{mid}/prune  -- → the pruned message (its new pN id)
+void RoomController::prune(const HttpRequestPtr &, Callback &&cb, int64_t id, int64_t mid)
+{
+    try
+    {
+        cb(json(TodoStore::get().pruneMessage(id, mid).toJson()));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+
+// GET /api/rooms/{id}/pruned  -- oldest first
+void RoomController::listPruned(const HttpRequestPtr &, Callback &&cb, int64_t id)
+{
+    try
+    {
+        TodoStore::get().room(id);
+    }
+    catch (const StoreError &e)
+    {
+        return cb(error(e));
+    }
+    Json::Value arr(Json::arrayValue);
+    for (const auto &m : TodoStore::get().listPrunedMessages(id))
+        arr.append(m.toJson());
+    cb(json(arr));
+}
+
+// DELETE /api/rooms/{id}/pruned  -- deletes the room's pruned messages for good
+void RoomController::clearPruned(const HttpRequestPtr &, Callback &&cb, int64_t id)
+{
+    try
+    {
+        Json::Value out;
+        out["removed"] = static_cast<Json::UInt64>(TodoStore::get().clearPrunedMessages(id));
+        cb(json(out));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+
+// POST /api/rooms/{id}/pruned/{pid}/restore  -- → the message, back in the log
+// in its place by time, with a free id
+void RoomController::restore(const HttpRequestPtr &, Callback &&cb, int64_t id, int64_t pid)
+{
+    try
+    {
+        cb(json(TodoStore::get().restoreMessage(id, pid).toJson(), k201Created));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+
+// DELETE /api/rooms/{id}/pruned/{pid}
+void RoomController::removePruned(const HttpRequestPtr &, Callback &&cb, int64_t id, int64_t pid)
+{
+    if (!TodoStore::get().removePrunedMessage(id, pid))
+        return cb(error(404, "pruned message not found"));
+    cb(HttpResponse::newHttpResponse(k204NoContent, CT_NONE));
 }

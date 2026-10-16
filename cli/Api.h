@@ -255,7 +255,7 @@ class Api
             send(drogon::Delete, roomPath(id) + "/members", nullptr, 0, {{"name", name}}));
     }
 
-    // Messages after `since` (the newest `limit` of them). With `wait`
+    // Messages after the cursor `since` (a seq; the newest `limit` of them). With `wait`
     // seconds, the server holds the request until there is one, or answers
     // with none when the time is up.
     std::vector<MessageItem> messages(int64_t roomId, int64_t since, size_t limit = 100,
@@ -276,6 +276,45 @@ class Api
         Json::Value body;
         body["text"] = text;
         return MessageItem::fromJson(send(drogon::Post, roomPath(roomId) + "/messages", &body));
+    }
+
+    // Pruning moves messages out of the log (they get pN ids), freeing their ids.
+    MessageItem pruneMessage(int64_t roomId, int64_t id)
+    {
+        return MessageItem::fromJson(
+            send(drogon::Post, roomPath(roomId) + "/messages/" + std::to_string(id) + "/prune"));
+    }
+
+    // All but the newest `keep`; returns how many.
+    size_t pruneMessages(int64_t roomId, size_t keep)
+    {
+        Json::Value body;
+        body["keep"] = static_cast<Json::UInt64>(keep);
+        return send(drogon::Post, roomPath(roomId) + "/messages/prune", &body)["pruned"].asUInt64();
+    }
+
+    std::vector<MessageItem> prunedMessages(int64_t roomId)
+    {
+        std::vector<MessageItem> out;
+        for (const auto &v : send(drogon::Get, roomPath(roomId) + "/pruned"))
+            out.push_back(MessageItem::fromJson(v));
+        return out;
+    }
+
+    MessageItem restoreMessage(int64_t roomId, int64_t prunedId)
+    {
+        return MessageItem::fromJson(send(
+            drogon::Post, roomPath(roomId) + "/pruned/" + std::to_string(prunedId) + "/restore"));
+    }
+
+    void removePrunedMessage(int64_t roomId, int64_t prunedId)
+    {
+        send(drogon::Delete, roomPath(roomId) + "/pruned/" + std::to_string(prunedId));
+    }
+
+    size_t clearPrunedMessages(int64_t roomId)
+    {
+        return send(drogon::Delete, roomPath(roomId) + "/pruned")["removed"].asUInt64();
     }
 
   private:

@@ -17,12 +17,14 @@ int64_t nowSeconds()
         .count();
 }
 
-// The lowest positive id no todo in `todos` has.
-int64_t freeId(const std::vector<Todo> &todos)
+// The lowest positive id none of `items` has (only those `in` accepts).
+template <typename T, typename In>
+int64_t freeId(const std::vector<T> &items, In in)
 {
     std::vector<int64_t> ids;
-    for (const auto &t : todos)
-        ids.push_back(t.id);
+    for (const auto &t : items)
+        if (in(t))
+            ids.push_back(t.id);
     std::sort(ids.begin(), ids.end());
     int64_t id = 1;
     for (int64_t used : ids)
@@ -31,6 +33,25 @@ int64_t freeId(const std::vector<Todo> &todos)
         else if (used > id)
             break;
     return id;
+}
+
+int64_t freeId(const std::vector<Todo> &todos)
+{
+    return freeId(todos, [](const Todo &) { return true; });
+}
+
+// The lowest id free among room `roomId`'s messages in `msgs`.
+int64_t freeMessageId(const std::vector<Message> &msgs, int64_t roomId)
+{
+    return freeId(msgs, [roomId](const Message &m) { return m.roomId == roomId; });
+}
+
+// Keeps `msgs` ordered by seq.
+void insertBySeq(std::vector<Message> &msgs, Message m)
+{
+    auto at = std::upper_bound(msgs.begin(), msgs.end(), m.seq,
+                               [](int64_t seq, const Message &x) { return seq < x.seq; });
+    msgs.insert(at, std::move(m));
 }
 
 // Ids are stored as JSON null when 0 ("none").
@@ -118,6 +139,7 @@ Json::Value Room::toJson() const
         m["lastSeen"] = static_cast<Json::Int64>(seen);
         v["members"].append(m);
     }
+    v["logVersion"] = static_cast<Json::Int64>(logVersion);
     return v;
 }
 
@@ -125,12 +147,15 @@ Json::Value Message::toJson() const
 {
     Json::Value v;
     v["id"] = static_cast<Json::Int64>(id);
+    v["seq"] = static_cast<Json::Int64>(seq);
     v["roomId"] = static_cast<Json::Int64>(roomId);
     v["author"] = author.empty() ? Json::Value() : Json::Value(author);
     v["text"] = text;
     v["createdAt"] = static_cast<Json::Int64>(createdAt);
     v["kind"] = kind;
     v["todoId"] = idOrNull(todoId);
+    if (prunedAt)
+        v["prunedAt"] = static_cast<Json::Int64>(prunedAt);
     return v;
 }
 
@@ -271,22 +296,27 @@ void TodoStore::load()
         r.createdAt = v["createdAt"].asInt64();
         for (const auto &m : v["members"])
             r.members[m["name"].asString()] = m["lastSeen"].asInt64();
+        r.logVersion = v["logVersion"].asInt64();
         nextRoomId_ = std::max(nextRoomId_, r.id + 1);
         rooms_.push_back(std::move(r));
     }
-    for (const auto &v : root.isObject() ? root["messages"] : Json::Value())
-    {
-        Message m;
-        m.id = v["id"].asInt64();
-        m.roomId = v["roomId"].asInt64();
-        m.author = v["author"].isString() ? v["author"].asString() : "";
-        m.text = v["text"].asString();
-        m.createdAt = v["createdAt"].asInt64();
-        m.kind = v["kind"].asString() == "event" ? "event" : "message";
-        m.todoId = v["todoId"].isNull() ? 0 : v["todoId"].asInt64();
-        nextMessageId_ = std::max(nextMessageId_, m.id + 1);
-        messages_.push_back(std::move(m));
-    }
+    for (const char *key : {"messages", "prunedMessages"})
+        for (const auto &v : root.isObject() ? root[key] : Json::Value())
+        {
+            Message m;
+            m.id = v["id"].asInt64();
+            // Before seq, ids were global and only grew, so they serve as one.
+            m.seq = v.isMember("seq") ? v["seq"].asInt64() : m.id;
+            m.roomId = v["roomId"].asInt64();
+            m.author = v["author"].isString() ? v["author"].asString() : "";
+            m.text = v["text"].asString();
+            m.createdAt = v["createdAt"].asInt64();
+            m.kind = v["kind"].asString() == "event" ? "event" : "message";
+            m.todoId = v["todoId"].isNull() ? 0 : v["todoId"].asInt64();
+            m.prunedAt = v["prunedAt"].asInt64();
+            nextSeq_ = std::max(nextSeq_, m.seq + 1);
+            insertBySeq(m.prunedAt ? prunedMessages_ : messages_, std::move(m));
+        }
 }
 
 void TodoStore::save() const
@@ -297,10 +327,13 @@ void TodoStore::save() const
     root["pruned"] = Json::Value(Json::arrayValue);
     root["rooms"] = Json::Value(Json::arrayValue);
     root["messages"] = Json::Value(Json::arrayValue);
+    root["prunedMessages"] = Json::Value(Json::arrayValue);
     for (const auto &r : rooms_)
         root["rooms"].append(r.toJson());
     for (const auto &m : messages_)
         root["messages"].append(m.toJson());
+    for (const auto &m : prunedMessages_)
+        root["prunedMessages"].append(m.toJson());
     for (const auto &t : todos_)
         root["todos"].append(t.toJson());
     for (const auto &t : pruned_)
@@ -707,15 +740,14 @@ const Message &TodoStore::append(int64_t roomId, const std::string &author,
         if (Room *r = findRoomById(roomId))
             r->members[author] = now;
 
-    // Drop the room's oldest message once it's over the limit.
-    size_t inRoom = 0;
-    for (const auto &m : messages_)
-        inRoom += m.roomId == roomId;
-    if (inRoom >= kMaxMessagesPerRoom)
-        messages_.erase(std::find_if(messages_.begin(), messages_.end(),
-                                     [roomId](const Message &m) { return m.roomId == roomId; }));
+    // Prune the room's oldest message once it's over the limit.
+    const auto inRoom = [roomId](const Message &m) { return m.roomId == roomId; };
+    if (static_cast<size_t>(std::count_if(messages_.begin(), messages_.end(), inRoom)) >=
+        kMaxMessagesPerRoom)
+        pruneAt(std::find_if(messages_.begin(), messages_.end(), inRoom), now);
 
-    messages_.push_back({nextMessageId_++, roomId, author, text, now, kind, todoId});
+    messages_.push_back(
+        {freeMessageId(messages_, roomId), nextSeq_++, roomId, author, text, now, kind, todoId});
     if (listener_)
         listener_(roomId);
     return messages_.back();
@@ -810,9 +842,10 @@ void TodoStore::removeRoom(int64_t id)
         for (auto &t : *list)
             if (t.roomId == id)
                 t.roomId = 0;
-    messages_.erase(std::remove_if(messages_.begin(), messages_.end(),
+    for (auto *list : {&messages_, &prunedMessages_})
+        list->erase(std::remove_if(list->begin(), list->end(),
                                    [id](const Message &m) { return m.roomId == id; }),
-                    messages_.end());
+                    list->end());
     rooms_.erase(std::remove_if(rooms_.begin(), rooms_.end(),
                                 [id](const Room &r) { return r.id == id; }),
                  rooms_.end());
@@ -833,21 +866,132 @@ std::vector<Message> TodoStore::messages(int64_t roomId, int64_t since, size_t l
     std::lock_guard<std::mutex> lock(mu_);
     std::vector<Message> out;
     for (const auto &m : messages_)
-        if (m.roomId == roomId && m.id > since)
+        if (m.roomId == roomId && m.seq > since)
             out.push_back(m);
     if (out.size() > limit)
         out.erase(out.begin(), out.end() - static_cast<std::ptrdiff_t>(limit));
     return out;
 }
 
-int64_t TodoStore::lastMessageId(int64_t roomId) const
+int64_t TodoStore::cursor(int64_t roomId) const
 {
     std::lock_guard<std::mutex> lock(mu_);
     int64_t last = 0;
     for (const auto &m : messages_)
         if (m.roomId == roomId)
-            last = m.id;
+            last = m.seq;
     return last;
+}
+
+// ── Pruned messages ──
+
+void TodoStore::pruneAt(std::vector<Message>::iterator it, int64_t now)
+{
+    Message p = *it;
+    messages_.erase(it);
+    p.id = freeMessageId(prunedMessages_, p.roomId);
+    p.prunedAt = now;
+    // Keep at most as many pruned as live: past that, the oldest go for good.
+    const auto inRoom = [&p](const Message &m) { return m.roomId == p.roomId; };
+    if (static_cast<size_t>(std::count_if(prunedMessages_.begin(), prunedMessages_.end(), inRoom)) >=
+        kMaxMessagesPerRoom)
+        prunedMessages_.erase(std::find_if(prunedMessages_.begin(), prunedMessages_.end(), inRoom));
+    if (Room *r = findRoomById(p.roomId))
+        ++r->logVersion;
+    insertBySeq(prunedMessages_, std::move(p));
+}
+
+Message TodoStore::pruneMessage(int64_t roomId, int64_t id)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    checkRoomExists(roomId);
+    auto it = std::find_if(messages_.begin(), messages_.end(),
+                           [&](const Message &m) { return m.roomId == roomId && m.id == id; });
+    if (it == messages_.end())
+        throw StoreError(404, "message not found");
+    const int64_t seq = it->seq;
+    pruneAt(it, nowSeconds());
+    save();
+    return *std::find_if(prunedMessages_.begin(), prunedMessages_.end(),
+                         [seq](const Message &m) { return m.seq == seq; });
+}
+
+size_t TodoStore::pruneMessages(int64_t roomId, size_t keep)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    checkRoomExists(roomId);
+    const auto inRoom = [roomId](const Message &m) { return m.roomId == roomId; };
+    const size_t live = std::count_if(messages_.begin(), messages_.end(), inRoom);
+    const size_t n = live > keep ? live - keep : 0;
+    const int64_t now = nowSeconds();
+    for (size_t i = 0; i < n; ++i)
+        pruneAt(std::find_if(messages_.begin(), messages_.end(), inRoom), now);
+    if (n)
+        save();
+    return n;
+}
+
+std::vector<Message> TodoStore::listPrunedMessages(int64_t roomId) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<Message> out;
+    for (const auto &m : prunedMessages_)
+        if (m.roomId == roomId)
+            out.push_back(m);
+    return out;
+}
+
+size_t TodoStore::prunedMessageCount(int64_t roomId) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return std::count_if(prunedMessages_.begin(), prunedMessages_.end(),
+                         [roomId](const Message &m) { return m.roomId == roomId; });
+}
+
+Message TodoStore::restoreMessage(int64_t roomId, int64_t prunedId)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    Room *r = findRoomById(roomId);
+    if (!r)
+        throw StoreError(404, "room not found");
+    auto it = std::find_if(prunedMessages_.begin(), prunedMessages_.end(),
+                           [&](const Message &m) { return m.roomId == roomId && m.id == prunedId; });
+    if (it == prunedMessages_.end())
+        throw StoreError(404, "pruned message not found");
+    Message m = *it;
+    prunedMessages_.erase(it);
+    m.id = freeMessageId(messages_, roomId);
+    m.prunedAt = 0;
+    insertBySeq(messages_, m);  // back in its place by time
+    ++r->logVersion;
+    save();
+    return m;
+}
+
+bool TodoStore::removePrunedMessage(int64_t roomId, int64_t prunedId)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = std::find_if(prunedMessages_.begin(), prunedMessages_.end(),
+                           [&](const Message &m) { return m.roomId == roomId && m.id == prunedId; });
+    if (it == prunedMessages_.end())
+        return false;
+    prunedMessages_.erase(it);
+    save();
+    return true;
+}
+
+size_t TodoStore::clearPrunedMessages(int64_t roomId)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    checkRoomExists(roomId);
+    const auto before = prunedMessages_.size();
+    prunedMessages_.erase(std::remove_if(prunedMessages_.begin(), prunedMessages_.end(),
+                                         [roomId](const Message &m) { return m.roomId == roomId; }),
+                          prunedMessages_.end());
+    const size_t n = before - prunedMessages_.size();
+    if (n)
+        save();
+    return n;
 }
 
 void TodoStore::touch(int64_t roomId, const std::string &agent)

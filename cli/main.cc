@@ -156,9 +156,18 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
                                       wait for new messages (after ID, else
                                       after the newest) and print them; exits
                                       1 if none came within SECONDS (60)
+  room prune <ROOM> [ID...] [--keep N]
+                                      move messages out of the log (all but
+                                      the newest N, or just these), freeing
+                                      their ids; they're kept as p1, p2...
+  room pruned <ROOM>                  list a room's pruned messages
+  room restore <ROOM> <pN...>         put pruned messages back, in time order
+  room purge <ROOM> [pN...]           delete pruned messages for good (all,
+                                      or just these)
 
-  Messages print as [#ID] time author: text; pass the last ID as --since to
-  read on from there. Changes to a room's todos show up as events.
+  Messages print as [#ID] time author: text, in the order they were posted;
+  pass the last ID as --since to read on from there. New messages take the
+  lowest id free in the room. Changes to a room's todos show up as events.
 
 Who you are in rooms, first match wins: --as NAME, $TODO_AGENT, $USER.
 
@@ -230,13 +239,6 @@ int64_t parseId(const std::string &s)
     {
     }
     throw UsageError("invalid id '" + s + "'");
-}
-
-// A message id to read on from: "12", "#12", or 0 for the start.
-int64_t parseCursor(const std::string &s)
-{
-    const std::string digits = !s.empty() && s[0] == '#' ? s.substr(1) : s;
-    return digits == "0" ? 0 : parseId(digits);
 }
 
 // A pruned todo's id: "p3" (or just "3").
@@ -343,10 +345,27 @@ RoomItem resolveRoom(Api &api, const std::string &ref)
     throw UsageError("no room \"" + ref + "\" (see `todo room`)");
 }
 
-// [#12] 14:03 alice: text  (events: [#13] 14:05 alice claimed #3 ...)
+// The cursor to read on after message `ref` ("12", "#12") of the room, or 0
+// for the start. Ids aren't in time order (pruning frees them), so it's that
+// message's seq.
+int64_t cursorAfter(Api &api, const RoomItem &room, const std::string &ref)
+{
+    const std::string digits = !ref.empty() && ref[0] == '#' ? ref.substr(1) : ref;
+    if (digits == "0")
+        return 0;
+    const auto id = parseId(digits);
+    for (const auto &m : api.messages(room.id, 0, 1000))
+        if (m.id == id)
+            return m.seq;
+    throw UsageError("no message #" + std::to_string(id) + " in " + room.name +
+                     " (pruned, or too old; see: todo room read " + room.name + ")");
+}
+
+// [#12] 14:03 alice: text  (events: [#13] 14:05 alice claimed #3 ...; pruned: [p4])
 void printMessage(const MessageItem &m, int indent = 0)
 {
-    std::cout << std::string(indent, ' ') << c("2", "[#" + std::to_string(m.id) + "] " + rooms::clock(m.createdAt)) << " ";
+    const std::string label = (m.prunedAt ? "[p" : "[#") + std::to_string(m.id) + "] ";
+    std::cout << std::string(indent, ' ') << c("2", label + rooms::clock(m.createdAt)) << " ";
     const std::string who = m.author.empty() ? "server" : m.author;
     if (m.event)
     {
@@ -725,8 +744,8 @@ int cmdRoom(Api &api, std::vector<std::string> args)
                 for (size_t i = 0; i < r.members.size(); ++i)
                     meta += (i ? ", " : "") + r.members[i].first;
             }
-            if (r.lastMessageId)
-                meta += " · last #" + std::to_string(r.lastMessageId);
+            if (r.prunedMessages)
+                meta += " · " + std::to_string(r.prunedMessages) + " pruned";
             std::cout << c("2", meta) << "\n";
         }
         return 0;
@@ -856,7 +875,7 @@ int cmdRoom(Api &api, std::vector<std::string> args)
         auto n = takeOpt(args, "-n", "--lines");
         need(3, "read <ROOM> [--since ID] [-n N]");
         const auto room = resolveRoom(api, args[2]);
-        const int64_t after = since ? parseCursor(*since) : 0;
+        const int64_t after = since ? cursorAfter(api, room, *since) : 0;
         const size_t count = n ? static_cast<size_t>(parseId(*n)) : since ? 1000 : 20;
         for (const auto &m : api.messages(room.id, after, count))
             printMessage(m);
@@ -869,7 +888,7 @@ int cmdRoom(Api &api, std::vector<std::string> args)
         auto t = takeOpt(args, "-t", "--timeout");
         need(3, "wait <ROOM> [--since ID] [-t SECONDS]");
         const auto room = resolveRoom(api, args[2]);
-        const int64_t after = since ? parseCursor(*since) : room.lastMessageId;
+        const int64_t after = since ? cursorAfter(api, room, *since) : room.cursor;
         double left = t ? std::atof(t->c_str()) : 60;
         if (left < 0)
             throw UsageError("the timeout can't be negative");
@@ -890,8 +909,78 @@ int cmdRoom(Api &api, std::vector<std::string> args)
         return 1;
     }
 
+    if (sub == "prune")
+    {
+        auto keep = takeOpt(args, "-k", "--keep");
+        need(3, "prune <ROOM> [ID...] [--keep N]");
+        const auto room = resolveRoom(api, args[2]);
+        if (args.size() == 3)
+        {
+            const auto n = api.pruneMessages(room.id, keep && *keep != "0" ? static_cast<size_t>(parseId(*keep)) : 0);
+            std::cout << "Pruned " << n << " message(s) from " << c("1;36", room.name)
+                      << (n ? "; their ids are free again (see: todo room pruned " + room.name + ")" : "")
+                      << "\n";
+            return 0;
+        }
+        if (keep)
+            throw UsageError("--keep is for pruning all messages; leave out the IDs");
+        for (size_t i = 3; i < args.size(); ++i)
+        {
+            const auto id = parseId(!args[i].empty() && args[i][0] == '#' ? args[i].substr(1) : args[i]);
+            const auto p = api.pruneMessage(room.id, id);
+            std::cout << "Pruned #" << id << " → ";
+            printMessage(p);
+        }
+        return 0;
+    }
+
+    if (sub == "pruned")
+    {
+        need(3, "pruned <ROOM>");
+        const auto room = resolveRoom(api, args[2]);
+        const auto msgs = api.prunedMessages(room.id);
+        if (msgs.empty())
+            std::cout << c("2", "Nothing pruned in " + room.name + ".") << "\n";
+        for (const auto &m : msgs)
+            printMessage(m);
+        return 0;
+    }
+
+    if (sub == "restore" || sub == "unprune")
+    {
+        need(4, "restore <ROOM> <pN...>");
+        const auto room = resolveRoom(api, args[2]);
+        for (size_t i = 3; i < args.size(); ++i)
+        {
+            const auto id = parsePrunedId(args[i]);
+            std::cout << "Restored p" << id << " as ";
+            printMessage(api.restoreMessage(room.id, id));
+        }
+        return 0;
+    }
+
+    if (sub == "purge")
+    {
+        need(3, "purge <ROOM> [pN...]");
+        const auto room = resolveRoom(api, args[2]);
+        if (args.size() == 3)
+        {
+            std::cout << "Deleted " << api.clearPrunedMessages(room.id) << " pruned message(s) of "
+                      << room.name << " for good\n";
+            return 0;
+        }
+        for (size_t i = 3; i < args.size(); ++i)
+        {
+            const auto id = parsePrunedId(args[i]);
+            api.removePrunedMessage(room.id, id);
+            std::cout << "Deleted p" << id << " for good\n";
+        }
+        return 0;
+    }
+
     throw UsageError("unknown `todo room` command '" + sub +
-                     "' (try: ls, add, topic, rename, rm, show, say, read, wait)");
+                     "' (try: ls, add, topic, rename, rm, show, say, read, wait, prune, pruned, "
+                     "restore, purge)");
 }
 
 int run(Api &api, const std::vector<std::string> &args)

@@ -124,8 +124,15 @@ being suggested; anyone who posts or reads the room again rejoins. Todos show `@
 
 In the interactive UI, rooms are a section of the categories panel: a room shows
 its todos, and the details panel becomes its log. `o` claims the selected todo
-(or releases your claim), `O` takes over someone else's, `i` posts to the room;
-on a room row `a` `e` `s` `d` add, rename, set the topic and delete.
+(or releases your claim), `O` takes over someone else's, `i` posts to the room
+(Enter sends; Shift+Enter, Alt+Enter or Ctrl+J start a new line);
+on a room row `a` `e` `s` `d` `P` add, rename, set the topic, delete and prune
+its messages.
+
+Messages are pruned like todos: pruning moves them out of the log (they're kept
+as p1, p2, ... and can be restored) and frees their ids, and a new message takes
+the lowest id free in its room, so ids stay small. The log is in the order
+messages were posted, whatever their ids.
 
 From the CLI, you are `--as NAME`, else `$TODO_AGENT`, else `$USER`:
 
@@ -137,6 +144,8 @@ todo room forget rover claude-old    # remove members so @ stops suggesting them
 todo room say rover Starting on the motor driver   # `-` reads stdin
 todo room read rover --since 41      # [#42] 14:03 claude-1: ...
 todo room wait rover --since 42 -t 600   # blocks until news; exit 1 on timeout
+todo room prune rover --keep 20      # all but the newest 20; or `prune rover 3 5`
+todo room pruned rover               # [p1] ...; `restore rover p1`, `purge rover [p1]`
 todo add -r rover Write tests
 todo claim 7                         # 409 if someone else has it; --force takes it
 todo release 7
@@ -349,14 +358,20 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | GET    | `/api/themes`            | –                                           | `[{"name", "colors": {role: "#rrggbb"}}]` |
 | POST   | `/api/todos/{id}/claim`  | `{"agent"?, "force"?}`                      | → the todo; 409 if someone else has it |
 | POST   | `/api/todos/{id}/release`| `{"agent"?, "force"?}`                      | → the todo; 409 if it's someone else's |
-| GET    | `/api/rooms`             | –                                           | rooms with `members`, `lastMessageId` |
+| GET    | `/api/rooms`             | –                                           | rooms with `members`, `cursor`, `prunedMessages`, `logVersion` |
 | POST   | `/api/rooms`             | `{"name", "topic"?}`                        | 201; 409 if name taken       |
 | GET    | `/api/rooms/{id}`        | –                                           | one room                     |
 | PATCH  | `/api/rooms/{id}`        | `{"name"?, "topic"?}`                       | → the room                   |
 | DELETE | `/api/rooms/{id}`        | –                                           | 204; deletes its messages, its todos stay |
 | DELETE | `/api/rooms/{id}/members` | –                                          | `?name=NAME` → the room, without them |
-| GET    | `/api/rooms/{id}/messages` | –                                         | `?since=ID&limit=N&wait=SECONDS` (long-poll, max 300) |
+| GET    | `/api/rooms/{id}/messages` | –                                         | `?since=SEQ&limit=N&wait=SECONDS` (long-poll, max 300) |
 | POST   | `/api/rooms/{id}/messages` | `{"text", "author"?}`                     | 201 → the message            |
+| POST   | `/api/rooms/{id}/messages/{mid}/prune` | –                             | → the pruned message (its pN id) |
+| POST   | `/api/rooms/{id}/messages/prune` | `{"keep"?}`                         | prunes all but the newest `keep` (0) → `{"pruned": n}` |
+| GET    | `/api/rooms/{id}/pruned` | –                                           | the room's pruned messages (own ids, `prunedAt`) |
+| POST   | `/api/rooms/{id}/pruned/{pid}/restore` | –                             | 201 → the message, back in place, with a free id |
+| DELETE | `/api/rooms/{id}/pruned/{pid}` | –                                     | 204                          |
+| DELETE | `/api/rooms/{id}/pruned` | –                                           | → `{"removed": n}`           |
 | POST   | `/mcp`                   | JSON-RPC                                    | MCP endpoint (see Rooms)     |
 
 `categoryId` / `parentId` are an id, or `null` for none / top level.
@@ -369,9 +384,13 @@ them, and their todos (so older clients simply don't see them). A category's
 `archived` is only its own flag; one inside an archived category is archived too.
 Todos also have `roomId` and `claimedBy` (an agent name or `null`). Requests that
 change todos may send `X-Todo-Agent: NAME` so room events name who did it.
-Message ids are global and only grow, so the last id you've seen is your cursor:
-`GET .../messages?since=ID&wait=60` answers as soon as there's a newer message,
-or with `[]` after 60 seconds. Messages have `kind` `"message"` or `"event"`
+Message ids are per room and reused once pruned, so they don't say what's
+newer: each message also has a `seq`, one counter for every room that only
+grows. Logs are in `seq` order, and the last `seq` you've seen (or a room's
+`cursor`) is your cursor: `GET .../messages?since=SEQ&wait=60` answers as soon
+as there's a newer message, or with `[]` after 60 seconds. A room's
+`logVersion` changes when messages are pruned or restored, so a client holding
+the log knows to load it again. Messages have `kind` `"message"` or `"event"`
 (written by the server, with the `todoId` it's about).
 
 ```json
@@ -380,10 +399,11 @@ or with `[]` after 60 seconds. Messages have `kind` `"message"` or `"event"`
 {"id": 3, "name": "Robotics", "parentId": 1, "createdAt": 1790319063, "archived": false,
  "style": {"fg": "#4f7fe0", "bold": true}}
 {"id": 1, "name": "rover", "topic": "Rover firmware", "createdAt": 1790319063,
- "members": [{"name": "claude-1", "lastSeen": 1790319100}], "lastMessageId": 8}
-{"id": 8, "roomId": 1, "author": "claude-1", "text": "claimed #2 Write tests",
+ "members": [{"name": "claude-1", "lastSeen": 1790319100}], "cursor": 8,
+ "prunedMessages": 0, "logVersion": 0}
+{"id": 3, "seq": 8, "roomId": 1, "author": "claude-1", "text": "claimed #2 Write tests",
  "createdAt": 1790319100, "kind": "event", "todoId": 2}
 ```
 
 Errors return `{"error": "..."}` with a 4xx status. The data file holds
-`{"todos": [...], "categories": [...], "pruned": [...], "rooms": [...], "messages": [...]}`; older files (a bare array of todos) load fine.
+`{"todos": [...], "categories": [...], "pruned": [...], "rooms": [...], "messages": [...], "prunedMessages": [...]}`; older files (a bare array of todos) load fine.

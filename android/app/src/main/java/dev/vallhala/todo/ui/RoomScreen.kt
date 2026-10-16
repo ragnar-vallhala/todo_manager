@@ -1,6 +1,13 @@
 package dev.vallhala.todo.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.ExpandLess
@@ -70,12 +77,16 @@ fun RoomScreen(model: AppModel, room: Room, padding: PaddingValues, onOpen: (Tod
         PrimaryTabRow(selectedTabIndex = tab) {
             Tab(tab == 0, { tab = 0 }, text = { Text("Log") })
             Tab(tab == 1, { tab = 1 }, text = { Text(if (open > 0) "Todos ($open)" else "Todos") })
+            if (room.prunedMessages > 0 || tab == 2)
+                Tab(tab == 2, { tab = 2 }, text = { Text(if (room.prunedMessages > 0) "Pruned (${room.prunedMessages})" else "Pruned") })
         }
-        if (tab == 0) {
-            Log(model, Modifier.weight(1f))
-            Composer(model, room)
-        } else {
-            TodoList(model, PaddingValues(), Modifier.weight(1f), onOpen)
+        when (tab) {
+            0 -> {
+                Log(model, Modifier.weight(1f))
+                Composer(model, room)
+            }
+            1 -> TodoList(model, PaddingValues(), Modifier.weight(1f), onOpen)
+            else -> PrunedLog(model, room, Modifier.weight(1f))
         }
     }
 }
@@ -146,12 +157,47 @@ private fun Log(model: AppModel, modifier: Modifier) {
         return
     }
     LazyColumn(modifier.fillMaxWidth(), state = state, contentPadding = PaddingValues(vertical = 8.dp)) {
-        items(msgs, key = { it.id }) { m -> MessageRow(model, m) }
+        items(msgs, key = { it.seq }) { m ->
+            // Long-press a message to prune it.
+            var menu by remember { mutableStateOf(false) }
+            Box {
+                MessageRow(model, m, Modifier.combinedClickable(onLongClick = { menu = true }, onClick = {}))
+                DropdownMenu(menu, { menu = false }) {
+                    DropdownMenuItem({ Text("Prune #${m.id}") }, { menu = false; model.pruneMessage(m) })
+                }
+            }
+        }
     }
 }
 
+/** The room's pruned messages, most recently pruned first, to restore or delete for good. */
 @Composable
-private fun MessageRow(model: AppModel, m: Message) {
+private fun PrunedLog(model: AppModel, room: Room, modifier: Modifier) {
+    LaunchedEffect(room.id, room.prunedMessages) { model.loadPrunedLog() }
+    val list = model.prunedLog.orEmpty().sortedWith(compareByDescending<Message> { it.prunedAt ?: 0 }.thenByDescending { it.seq })
+    LazyColumn(modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 8.dp)) {
+        if (list.isEmpty()) item {
+            Text("Nothing pruned. Long-press a message to prune it and free its id.", Modifier.fillMaxWidth().padding(32.dp),
+                textAlign = TextAlign.Center, color = LocalExtra.current.muted)
+        }
+        items(list, key = { it.seq }) { m ->
+            Row(Modifier.fillMaxWidth().padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    MessageRow(model, m)
+                    Text("p${m.id}" + (m.prunedAt?.let { " · pruned ${ago(it)}" } ?: ""),
+                        Modifier.padding(start = 16.dp, bottom = 4.dp),
+                        style = MaterialTheme.typography.labelSmall, color = LocalExtra.current.muted)
+                }
+                IconButton(onClick = { model.restoreMessage(m) }) { Icon(Icons.AutoMirrored.Filled.Undo, "Restore") }
+                IconButton(onClick = { model.deletePrunedMessage(m) }) { Icon(Icons.Default.Delete, "Delete for good", tint = MaterialTheme.colorScheme.error) }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageRow(model: AppModel, m: Message, modifier: Modifier = Modifier) {
     val extra = LocalExtra.current
     val mine = m.author == model.agent
     val mentioned = !mine && Regex("@${Regex.escape(model.agent)}\\b").containsMatchIn(m.text)
@@ -165,12 +211,12 @@ private fun MessageRow(model: AppModel, m: Message) {
             style = MaterialTheme.typography.bodySmall,
             fontStyle = FontStyle.Italic,
             color = extra.muted,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
         )
         return
     }
     Column(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .then(if (mentioned) Modifier.background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)) else Modifier)
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {

@@ -18,7 +18,9 @@ struct RoomItem
     std::string topic;  // "" for none
     int64_t createdAt{0};
     std::vector<std::pair<std::string, int64_t>> members;  // (agent, last seen)
-    int64_t lastMessageId{0};  // the cursor to read or wait after
+    int64_t cursor{0};  // the newest message's seq, to read or wait after
+    int64_t prunedMessages{0};
+    int64_t logVersion{0};  // changes when messages are pruned or restored
 
     static RoomItem fromJson(const Json::Value &v)
     {
@@ -26,14 +28,19 @@ struct RoomItem
                    v["topic"].isString() ? v["topic"].asString() : "", v["createdAt"].asInt64()};
         for (const auto &m : v["members"])
             r.members.push_back({m["name"].asString(), m["lastSeen"].asInt64()});
-        r.lastMessageId = v["lastMessageId"].asInt64();
+        r.cursor = v["cursor"].asInt64();
+        r.prunedMessages = v["prunedMessages"].asInt64();
+        r.logVersion = v["logVersion"].asInt64();
         return r;
     }
 };
 
+// Ids are per room and get reused once pruned; `seq` orders the log and is
+// the cursor for reading what's new.
 struct MessageItem
 {
     int64_t id{0};
+    int64_t seq{0};
     int64_t roomId{0};
     std::string author;  // "" for the server
     std::string text;
@@ -42,16 +49,19 @@ struct MessageItem
     // #3 ..."); its text reads after the author's name.
     bool event{false};
     int64_t todoId{0};
+    int64_t prunedAt{0};  // pruned messages only
 
     static MessageItem fromJson(const Json::Value &v)
     {
         return {v["id"].asInt64(),
+                v["seq"].asInt64(),
                 v["roomId"].asInt64(),
                 v["author"].isString() ? v["author"].asString() : "",
                 v["text"].asString(),
                 v["createdAt"].asInt64(),
                 v["kind"].asString() == "event",
-                v["todoId"].isNull() ? 0 : v["todoId"].asInt64()};
+                v["todoId"].isNull() ? 0 : v["todoId"].asInt64(),
+                v["prunedAt"].asInt64()};
     }
 };
 

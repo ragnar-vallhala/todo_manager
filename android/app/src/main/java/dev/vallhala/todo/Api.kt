@@ -60,17 +60,24 @@ data class Room(
     val name: String,
     val topic: String,
     val members: List<Member>,
-    val lastMessageId: Long,
+    /** The newest message's seq, the cursor to read or wait after. */
+    val cursor: Long,
+    val prunedMessages: Int,
+    /** Goes up when messages are pruned or restored, so a loaded log is stale. */
+    val logVersion: Long,
 )
 
+/** [id] is the lowest free in its room (pN once pruned); [seq] only grows, so it orders the log. */
 data class Message(
     val id: Long,
+    val seq: Long,
     val roomId: Int,
     val author: String,
     val text: String,
     val createdAt: Long,
     val isEvent: Boolean,
     val todoId: Int?,
+    val prunedAt: Long? = null,
 )
 
 data class ServerTheme(val name: String, val colors: Map<String, String>)
@@ -115,17 +122,21 @@ private fun roomOf(o: JSONObject) = Room(
     name = o.optString("name"),
     topic = o.str("topic") ?: "",
     members = o.optJSONArray("members")?.map { Member(it.optString("name"), it.optLong("lastSeen")) } ?: emptyList(),
-    lastMessageId = o.optLong("lastMessageId"),
+    cursor = o.optLong("cursor"),
+    prunedMessages = o.optInt("prunedMessages"),
+    logVersion = o.optLong("logVersion"),
 )
 
 private fun messageOf(o: JSONObject) = Message(
     id = o.getLong("id"),
+    seq = o.optLong("seq", o.getLong("id")),
     roomId = o.optInt("roomId"),
     author = o.optString("author"),
     text = o.optString("text"),
     createdAt = o.optLong("createdAt"),
     isEvent = o.optString("kind") == "event",
     todoId = o.int("todoId"),
+    prunedAt = o.long("prunedAt"),
 )
 
 private fun themeOf(o: JSONObject): ServerTheme {
@@ -225,7 +236,16 @@ class Api(baseUrl: String, private val agent: String) {
     suspend fun messages(roomId: Int, limit: Int = 200) =
         arr("api/rooms/$roomId/messages", mapOf("limit" to "$limit")).map(::messageOf)
 
-    /** Answers as soon as there's a message after [since], or with nothing after [wait] seconds. */
+    // Pruned messages
+    suspend fun pruneMessage(roomId: Int, id: Long) { call("POST", "api/rooms/$roomId/messages/$id/prune") }
+    suspend fun pruneMessages(roomId: Int, keep: Int = 0): Int =
+        obj("POST", "api/rooms/$roomId/messages/prune", body("keep" to keep)).optInt("pruned")
+    suspend fun prunedMessages(roomId: Int) = arr("api/rooms/$roomId/pruned").map(::messageOf)
+    suspend fun restoreMessage(roomId: Int, id: Long) = messageOf(obj("POST", "api/rooms/$roomId/pruned/$id/restore"))
+    suspend fun deletePrunedMessage(roomId: Int, id: Long) { call("DELETE", "api/rooms/$roomId/pruned/$id") }
+    suspend fun deleteAllPrunedMessages(roomId: Int) { call("DELETE", "api/rooms/$roomId/pruned") }
+
+    /** Answers as soon as there's a message with seq after [since], or with nothing after [wait] seconds. */
     suspend fun waitMessages(roomId: Int, since: Long, wait: Int = 50) =
         arr("api/rooms/$roomId/messages", mapOf("since" to "$since", "wait" to "$wait"), longPoll).map(::messageOf)
 

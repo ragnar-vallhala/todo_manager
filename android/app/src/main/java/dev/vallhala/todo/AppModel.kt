@@ -73,9 +73,11 @@ class AppModel(app: Application) : AndroidViewModel(app) {
     /** One-off messages for the snackbar. */
     val notices = mutableStateListOf<String>()
 
-    /** The open room's log. */
+    /** The open room's log, by seq. */
     val log = mutableStateListOf<Message>()
     private var logRoom: Int? = null
+    /** The open room's pruned messages, once asked for (null until then). */
+    var prunedLog by mutableStateOf<List<Message>?>(null); private set
     private var poll: Job? = null
     private var foreground = false
 
@@ -92,7 +94,10 @@ class AppModel(app: Application) : AndroidViewModel(app) {
             val c = api.categories()
             val r = api.rooms()
             val p = api.pruned()
+            // Messages pruned or restored elsewhere: the loaded log is stale.
+            val stale = logRoom?.let { id -> room(id)?.logVersion != r.find { it.id == id }?.logVersion } == true
             todos = t; cats = c; rooms = r; pruned = p
+            if (stale) reloadLog()
             offline = null
             loaded = true
             // A view that no longer exists (deleted elsewhere) falls back to All.
@@ -149,7 +154,7 @@ class AppModel(app: Application) : AndroidViewModel(app) {
         prefs.server = newServer; prefs.agent = newAgent; prefs.configured = true
         server = prefs.server; agent = prefs.agent; needsSetup = false
         api = a
-        poll?.cancel(); poll = null; logRoom = null; log.clear()
+        poll?.cancel(); poll = null; logRoom = null; log.clear(); prunedLog = null
         refresh()
         syncPoll()
         return null
@@ -309,7 +314,7 @@ class AppModel(app: Application) : AndroidViewModel(app) {
     // ── Rooms ──
 
     fun room(id: Int?) = id?.let { i -> rooms.find { it.id == i } }
-    fun unread(r: Room) = r.lastMessageId > (lastRead[r.id] ?: 0)
+    fun unread(r: Room) = r.cursor > (lastRead[r.id] ?: 0)
 
     fun addRoom(name: String, topic: String) = change {
         val r = api.addRoom(name.trim(), topic.trim())
@@ -330,9 +335,33 @@ class AppModel(app: Application) : AndroidViewModel(app) {
         if (logRoom == id) addMessages(listOf(msg))
     }
 
+    // ── Pruned messages ──
+
+    // These bump the room's logVersion, so the refresh after them reloads the log.
+    fun pruneMessage(m: Message) = change { api.pruneMessage(m.roomId, m.id) }
+    fun pruneMessages(roomId: Int) = change { notices += "Pruned ${api.pruneMessages(roomId)} messages" }
+    fun restoreMessage(m: Message) = change { notices += "Restored as #${api.restoreMessage(m.roomId, m.id).id}" }
+    fun deletePrunedMessage(m: Message) = change { api.deletePrunedMessage(m.roomId, m.id); loadPrunedLog() }
+    fun deleteAllPrunedMessages(roomId: Int) = change { api.deleteAllPrunedMessages(roomId); loadPrunedLog() }
+
+    /** Loads the open room's pruned messages. */
+    fun loadPrunedLog() = launch {
+        val id = logRoom ?: return@launch
+        val list = api.prunedMessages(id)
+        if (logRoom == id) prunedLog = list
+    }
+
+    /** Loads the open room's log again from scratch (and its pruned list, if shown). */
+    private fun reloadLog() {
+        poll?.cancel(); poll = null
+        log.clear()
+        if (prunedLog != null) loadPrunedLog()
+        syncPoll()
+    }
+
     private fun markRead() {
         val id = logRoom ?: return
-        val last = log.lastOrNull()?.id ?: return
+        val last = log.lastOrNull()?.seq ?: return
         if ((lastRead[id] ?: 0) >= last) return
         lastRead = lastRead + (id to last)
         prefs.lastRead = lastRead
@@ -340,13 +369,13 @@ class AppModel(app: Application) : AndroidViewModel(app) {
 
     /** Adds messages not already in the log; true if any were events (a room todo changed). */
     private fun addMessages(msgs: List<Message>): Boolean {
-        val have = log.mapTo(HashSet()) { it.id }
-        val fresh = msgs.filter { it.id !in have }
+        val have = log.mapTo(HashSet()) { it.seq }
+        val fresh = msgs.filter { it.seq !in have }
         if (fresh.isEmpty()) return false
         log.addAll(fresh)
-        log.sortBy { it.id }
-        val top = fresh.maxOf { it.id }
-        rooms = rooms.map { if (it.id == logRoom && it.lastMessageId < top) it.copy(lastMessageId = top) else it }
+        log.sortBy { it.seq }
+        val top = fresh.maxOf { it.seq }
+        rooms = rooms.map { if (it.id == logRoom && it.cursor < top) it.copy(cursor = top) else it }
         if (foreground) markRead()
         return fresh.any { it.isEvent }
     }
@@ -360,7 +389,7 @@ class AppModel(app: Application) : AndroidViewModel(app) {
         }
         if (poll?.isActive == true && logRoom == id) return
         poll?.cancel()
-        if (logRoom != id) { log.clear(); logRoom = id }
+        if (logRoom != id) { log.clear(); logRoom = id; prunedLog = null }
         markRead()
         poll = viewModelScope.launch {
             var backoff = 1000L
@@ -370,7 +399,7 @@ class AppModel(app: Application) : AndroidViewModel(app) {
                     if (initial) {
                         addMessages(api.messages(id))
                         initial = false
-                    } else if (addMessages(api.waitMessages(id, log.lastOrNull()?.id ?: 0))) {
+                    } else if (addMessages(api.waitMessages(id, log.lastOrNull()?.seq ?: 0))) {
                         refresh()
                     }
                     backoff = 1000L
