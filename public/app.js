@@ -44,19 +44,20 @@ function remember() {
 
 // ── API ──
 
-async function api(method, path, body, { signal } = {}) {
+// With `raw`, the body (a File or Blob) is sent as it is, not as JSON.
+async function api(method, path, body, { signal, raw = false } = {}) {
   let res;
   // Says who you are, so changes to room todos are announced under your name.
   // Header values must be ASCII; other names go in ?agent= instead.
   const ascii = /^[\x20-\x7e]+$/.test(me);
   const headers = ascii ? { 'X-Todo-Agent': me } : {};
   if (!ascii && me) path += (path.includes('?') ? '&' : '?') + 'agent=' + encodeURIComponent(me);
-  if (body) headers['Content-Type'] = 'application/json';
+  if (body) headers['Content-Type'] = raw ? 'application/octet-stream' : 'application/json';
   try {
     res = await fetch('/api' + path, {
       method,
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: body ? (raw ? body : JSON.stringify(body)) : undefined,
       signal,
     });
   } catch (e) {
@@ -549,6 +550,7 @@ function renderItem(todo, showTag) {
     desc.title = 'Click to show all / less';
     desc.addEventListener('click', () => desc.classList.toggle('open'));
   }
+  if (todo.attachments?.length) $('.body', li).append(attachmentList(todo.attachments));
   title.title = 'Added ' + new Date(todo.createdAt * 1000).toLocaleString();
   title.addEventListener('dblclick', () => startEdit(title, todo));
   title.addEventListener('keydown', (e) => {
@@ -1291,8 +1293,82 @@ function messageRow(m, tools) {
   else if (m.author) author.style.setProperty('--hue', nameHue(m.author));
   const bar = el('span', { className: 'msg-tools' }, ...tools);
   if (m.kind === 'event') return el('li', { className: 'msg event' }, author, ' ', el('span', {}, ...richText(m.text)), time, bar);
-  return el('li', { className: 'msg' }, el('div', { className: 'msg-head' }, author, time, bar),
-    el('p', { className: 'msg-text' }, ...richText(m.text)));
+  const li = el('li', { className: 'msg' }, el('div', { className: 'msg-head' }, author, time, bar));
+  if (m.text) li.append(el('p', { className: 'msg-text' }, ...richText(m.text)));
+  if (m.attachments?.length) li.append(attachmentList(m.attachments));
+  return li;
+}
+
+// ── Attachments: images and PDFs on messages and todos ──
+
+const FILE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf'];
+const MAX_FILE = 10 * 1024 * 1024;  // the server's limit
+let pendingFiles = [];   // for the message being written: uploaded ones, and { name, uploading: true }
+let pendingRoom = null;  // the room they're for
+
+const fileUrl = (a) => `/api/files/${a.id}?name=${encodeURIComponent(a.name)}`;
+
+function sizeLabel(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Thumbnails for images (click: the full image, in a new tab) and a link
+// for other files.
+function attachmentList(list) {
+  return el('div', { className: 'attachments' }, ...list.map((a) => {
+    // Not draggable, so dragging a todo by its thumbnail still moves the todo.
+    const link = el('a', { href: fileUrl(a), target: '_blank', rel: 'noopener', draggable: false,
+      title: `${a.name} · ${a.width ? `${a.width}×${a.height} · ` : ''}${sizeLabel(a.size)}` });
+    if (a.type.startsWith('image/')) {
+      link.className = 'thumb';
+      const img = el('img', { src: fileUrl(a), alt: a.name, loading: 'lazy', decoding: 'async', draggable: false });
+      if (a.width && a.height) Object.assign(img, { width: a.width, height: a.height });
+      link.append(img);
+    } else {
+      link.className = 'file-chip';
+      link.append(el('span', { className: 'file-kind', textContent: 'PDF' }), a.name,
+        el('span', { className: 'seen', textContent: ' · ' + sizeLabel(a.size) }));
+    }
+    return link;
+  }));
+}
+
+// Uploads files for the message being written; they show as chips until it's sent.
+function addFiles(files) {
+  const id = roomIdOf();
+  if (id == null) return;
+  for (const file of files) {
+    const name = file.name || 'pasted.png';
+    if (!FILE_TYPES.includes(file.type) && !/\.(png|jpe?g|gif|webp|pdf)$/i.test(name)) {
+      showError(new Error(`${name} isn't an image (PNG, JPEG, GIF, WebP) or a PDF.`));
+      continue;
+    }
+    if (file.size > MAX_FILE) {
+      showError(new Error(`${name} is over 10 MB, the most the server takes.`));
+      continue;
+    }
+    const item = { name, uploading: true };
+    pendingFiles.push(item);
+    pendingRoom = id;
+    api('POST', '/files?name=' + encodeURIComponent(name), file, { raw: true })
+      .then((a) => { Object.assign(item, a, { uploading: false }); showError(null); })
+      .catch((e) => { pendingFiles = pendingFiles.filter((x) => x !== item); showError(e); })
+      .finally(renderPending);
+  }
+  renderPending();
+}
+
+function renderPending() {
+  if (pendingRoom !== roomIdOf()) pendingFiles = [];  // they were for another room
+  $('#post-files').replaceChildren(...pendingFiles.map((f) => {
+    const remove = el('button', { type: 'button', className: 'forget', ariaLabel: `Don't attach ${f.name}`, title: "Don't attach it" });
+    remove.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 5l6 6M11 5l-6 6"/></svg>';
+    remove.addEventListener('click', () => { pendingFiles = pendingFiles.filter((x) => x !== f); renderPending(); });
+    return el('li', { className: 'member' + (f.uploading ? ' uploading' : '') },
+      f.name, el('span', { className: 'seen', textContent: f.uploading ? ' · uploading…' : ' · ' + sizeLabel(f.size) }), remove);
+  }));
 }
 
 function renderLog() {
@@ -1340,6 +1416,7 @@ function renderLog() {
   const shown = `${log.roomId}:${showPruned ? 'pruned' : 'log'}`;
   if (atBottom || box.dataset.room !== shown) box.scrollTop = box.scrollHeight;
   box.dataset.room = shown;
+  renderPending();
   markRead();
 }
 
@@ -1450,13 +1527,48 @@ $('#room-post').addEventListener('submit', (e) => {
   const box = $('#room-text');
   const text = box.value.trim();
   const id = roomIdOf();
-  if (!text || id == null) return;
+  const files = pendingFiles;
+  if ((!text && !files.length) || id == null) return;
+  if (files.some((f) => f.uploading)) return showError(new Error('Wait for the files to finish uploading.'));
   run(async () => {
-    const msg = await api('POST', `/rooms/${id}/messages`, { text, author: me });
+    const attachments = files.map(({ id: fileId, name }) => ({ id: fileId, name }));
+    const msg = await api('POST', `/rooms/${id}/messages`, { text, author: me, attachments });
     box.value = '';
+    pendingFiles = pendingFiles.filter((f) => !files.includes(f));
     updateMentions();
     if (log.roomId === id) addMessages([msg]);
   });
+});
+
+// Attach by the button, by pasting an image or by dropping files on the conversation.
+$('#attach-btn').addEventListener('click', () => $('#file-input').click());
+$('#file-input').addEventListener('change', (e) => {
+  addFiles([...e.target.files]);
+  e.target.value = '';
+  $('#room-text').focus();
+});
+$('#room-text').addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length) return;  // plain text pastes as usual
+  e.preventDefault();
+  addFiles(files);
+});
+const logSection = $('#room-log-section');
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+logSection.addEventListener('dragover', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  logSection.classList.add('file-over');
+});
+logSection.addEventListener('dragleave', (e) => {
+  if (!logSection.contains(e.relatedTarget)) logSection.classList.remove('file-over');
+});
+logSection.addEventListener('drop', (e) => {
+  logSection.classList.remove('file-over');
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  addFiles([...e.dataTransfer.files]);
 });
 // ── @mentions: suggest the room's members while typing "@name" ──
 

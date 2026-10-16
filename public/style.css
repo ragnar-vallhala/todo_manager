@@ -774,6 +774,52 @@ dialog .keep-row input.keep { width: 5.5em; margin: 0; }
 }
 #room-text:focus { border-color: var(--text); }
 #room-post { position: relative; }
+/* Files waiting to be sent, and the button to add some */
+.post-bar { display: flex; align-items: flex-start; gap: 8px; margin-top: 6px; }
+.post-files { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; margin: 0; padding: 0; list-style: none; }
+.post-files .member { font-size: 0.8125rem; }
+.post-files .uploading { opacity: 0.7; }
+#attach-btn { margin-left: auto; white-space: nowrap; padding: 2px 0; }
+.room-log-section.file-over .room-log, .room-log-section.file-over #room-text {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+/* Attachments: image thumbnails and file links, in messages and todos */
+.attachments { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 6px; }
+.attachments .thumb {
+  display: block;
+  max-width: 100%;
+  line-height: 0;
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--hover);
+}
+.attachments .thumb img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 240px;
+  max-height: 180px;
+}
+.attachments .thumb:hover { border-color: var(--muted); }
+.file-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  font-size: 0.8125rem;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+}
+.file-chip:hover { border-color: var(--muted); }
+.file-chip .file-kind { font-size: 0.6875rem; font-weight: 600; color: var(--danger); }
+.file-chip .seen { color: var(--muted); }
+.item .attachments .thumb img { max-width: 180px; max-height: 120px; }
 /* "@name" suggestions, opening upwards from the message box. */
 .mentions {
   top: auto;

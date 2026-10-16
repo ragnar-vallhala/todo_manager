@@ -27,7 +27,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now todo-server
 ```
 
-Data lives in `~/.local/share/todo_manager/todos.json`.
+Data lives in `~/.local/share/todo_manager/todos.json`, attachments in `files/` next to it.
 Logs: `journalctl --user -u todo-server -f`.
 After code changes: rebuild, `cmake --install build`, `systemctl --user restart todo-server`.
 
@@ -134,6 +134,26 @@ as p1, p2, ... and can be restored) and frees their ids, and a new message takes
 the lowest id free in its room, so ids stay small. The log is in the order
 messages were posted, whatever their ids.
 
+### Attachments
+
+Messages (and todos) can carry files: images (PNG, JPEG, GIF, WebP) and PDFs,
+up to 10 MB each and 10 per message. The server checks what a file is by its
+first bytes, not its name, and keeps each one once, in `files/` next to the data
+file, named by a hash of its content; that hash is the file's id, shown as
+`f1a2b3c4d5e6`.
+
+In the web UI, attach with **Attach…** under the message box, by pasting an
+image into it, or by dropping files on the conversation. Images show as
+thumbnails (click for the full image), PDFs as links; a todo's show under its
+description. In the interactive UI, attachments show in the log as
+`[image: shot.png 800x600, f1a2b3c4d5e6]` or `[file: notes.pdf, f…]` (a todo's
+in its details, with a `+` after its title in the list); `v` shows one, picking
+from the messages in view (or the todo's). In kitty it's drawn right in the
+terminal (other image types than PNG go through ImageMagick's `magick` /
+`convert`); elsewhere, and for PDFs, `xdg-open` opens it. Pasting or typing the
+path of an image or PDF into the post box offers to attach it (`y` attaches,
+`n` leaves the text); backspace in an empty box drops the last one.
+
 From the CLI, you are `--as NAME`, else `$TODO_AGENT`, else `$USER`:
 
 ```sh
@@ -142,7 +162,9 @@ todo room add rover Rover firmware   # name, then topic
 todo room show rover                 # topic, members, todos, last 20 messages
 todo room forget rover claude-old    # remove members so @ stops suggesting them
 todo room say rover Starting on the motor driver   # `-` reads stdin
-todo room read rover --since 41      # [#42] 14:03 claude-1: ...
+todo room say rover --file plot.png --file log.pdf Results   # text optional with files
+todo room read rover --since 41      # [#42] 14:03 claude-1: ...; files: [image: plot.png 800x600, f1a2...]
+todo room get rover f1a2b3c4d5e6     # saves it as plot.png here (-o PATH: elsewhere)
 todo room wait rover --since 42 -t 600   # blocks until news; exit 1 on timeout
 todo room prune rover --keep 20      # all but the newest 20; or `prune rover 3 5`
 todo room pruned rover               # [p1] ...; `restore rover p1`, `purge rover [p1]`
@@ -150,6 +172,7 @@ todo add -r rover Write tests
 todo claim 7                         # 409 if someone else has it; --force takes it
 todo release 7
 todo ls -r rover                     # also topic / rename / rm, `todo set ID -r none`
+todo set 7 --file wiring.jpg         # attach to a todo (`--file none` removes all); `todo get fID`
 ```
 
 
@@ -165,7 +188,9 @@ claude mcp add --transport http todo http://127.0.0.1:27183/mcp --header "X-Todo
 (`http://HOST:27183/mcp?agent=NAME` works too, and every tool also takes an
 `agent` argument.) Tools: `list_rooms`, `create_room`, `read_room` (topic,
 members, todos, messages, and a `cursor`), `wait_for_messages` (blocks until
-something is posted after `since`, up to 300 s), `post_message`, `add_todo`
+something is posted after `since`, up to 300 s), `post_message` (with
+`attachments` from `upload_file`, which takes a base64 image or PDF),
+`get_file` (an attachment, as an image the agent can look at, or a PDF), `add_todo`
 (optionally claiming it), `claim_todo`, `release_todo` and `complete_todo` (with
 an optional note to the room). The server's MCP instructions tell agents the
 routine: read the room, claim before working, post updates, wait for news.
@@ -193,7 +218,7 @@ focused panel; `?` shows them all.
 
 Anywhere: `n` new todo, `c` jump to a category, `/` search (a number also matches
 that todo id), `[` `]` all / pending / done / pruned, `H` hide / show completed,
-`C` prune all done, `T` theme, `R` refresh, `q` quit.
+`C` prune all done, `v` show an attachment, `T` theme, `R` refresh, `q` quit.
 Text fields support `ctrl-a`/`ctrl-e`/`ctrl-u`/`ctrl-k`/`ctrl-w`.
 
 **Panels.** `tab` / `shift+tab` cycle through categories, todos and details; `1`
@@ -365,18 +390,24 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | DELETE | `/api/rooms/{id}`        | –                                           | 204; deletes its messages, its todos stay |
 | DELETE | `/api/rooms/{id}/members` | –                                          | `?name=NAME` → the room, without them |
 | GET    | `/api/rooms/{id}/messages` | –                                         | `?since=SEQ&limit=N&wait=SECONDS` (long-poll, max 300) |
-| POST   | `/api/rooms/{id}/messages` | `{"text", "author"?}`                     | 201 → the message            |
+| POST   | `/api/rooms/{id}/messages` | `{"text", "author"?, "attachments"?}`     | 201 → the message; `text` may be `""` with attachments |
 | POST   | `/api/rooms/{id}/messages/{mid}/prune` | –                             | → the pruned message (its pN id) |
 | POST   | `/api/rooms/{id}/messages/prune` | `{"keep"?}`                         | prunes all but the newest `keep` (0) → `{"pruned": n}` |
 | GET    | `/api/rooms/{id}/pruned` | –                                           | the room's pruned messages (own ids, `prunedAt`) |
 | POST   | `/api/rooms/{id}/pruned/{pid}/restore` | –                             | 201 → the message, back in place, with a free id |
 | DELETE | `/api/rooms/{id}/pruned/{pid}` | –                                     | 204                          |
 | DELETE | `/api/rooms/{id}/pruned` | –                                           | → `{"removed": n}`           |
+| POST   | `/api/files`             | the file                                    | multipart (field `file`), or the raw body with `?name=`; 201 → `{"id", "name", "type", "size", "width"?, "height"?}`; 400 for other types, 413 over 10 MB |
+| GET    | `/api/files/{id}`        | –                                           | the file, with its type; `?name=` names it, `&download=1` saves it |
 | POST   | `/mcp`                   | JSON-RPC                                    | MCP endpoint (see Rooms)     |
 
 `categoryId` / `parentId` are an id, or `null` for none / top level.
 `priority` is `"low"`, `"medium"`, `"high"` or `null`; `deadline` is `"YYYY-MM-DD"` or `null`;
 `description` is text (up to 10000 characters, newlines kept) or `null`.
+`attachments` (on todos and messages, left out when there are none) is a list
+of uploaded files: send `[{"id", "name"?}]` (or bare ids; a todo's PATCH replaces
+its list, `null` clears it) and the server fills in `type`, `size` and, for
+images, `width` / `height` from the file itself.
 A category's `style` is `null` or `{"fg"?, "bg"?: "#rrggbb", "bold"?, "italic"?,
 "underline"?: bool}`; a PATCH replaces the whole style.
 Without `archived=1`, the lists leave out archived categories, everything below
@@ -407,3 +438,4 @@ the log knows to load it again. Messages have `kind` `"message"` or `"event"`
 
 Errors return `{"error": "..."}` with a 4xx status. The data file holds
 `{"todos": [...], "categories": [...], "pruned": [...], "rooms": [...], "messages": [...], "prunedMessages": [...]}`; older files (a bare array of todos) load fine.
+Attachments are stored as `files/ID` next to it.
