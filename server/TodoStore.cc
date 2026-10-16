@@ -48,6 +48,14 @@ std::string lower(std::string s)
             c = static_cast<char>(c - 'A' + 'a');
     return s;
 }
+
+// Older messages are dropped past this many per room.
+constexpr size_t kMaxMessagesPerRoom = 5000;
+
+std::string label(const Todo &t)
+{
+    return "#" + std::to_string(t.id) + " " + t.title;
+}
 }  // namespace
 
 std::string priorityName(int priority)
@@ -90,6 +98,39 @@ Json::Value Todo::toJson() const
     v["description"] = description.empty() ? Json::Value() : Json::Value(description);
     if (prunedAt)
         v["prunedAt"] = static_cast<Json::Int64>(prunedAt);
+    v["roomId"] = idOrNull(roomId);
+    v["claimedBy"] = claimedBy.empty() ? Json::Value() : Json::Value(claimedBy);
+    return v;
+}
+
+Json::Value Room::toJson() const
+{
+    Json::Value v;
+    v["id"] = static_cast<Json::Int64>(id);
+    v["name"] = name;
+    v["topic"] = topic.empty() ? Json::Value() : Json::Value(topic);
+    v["createdAt"] = static_cast<Json::Int64>(createdAt);
+    v["members"] = Json::Value(Json::arrayValue);
+    for (const auto &[agent, seen] : members)
+    {
+        Json::Value m;
+        m["name"] = agent;
+        m["lastSeen"] = static_cast<Json::Int64>(seen);
+        v["members"].append(m);
+    }
+    return v;
+}
+
+Json::Value Message::toJson() const
+{
+    Json::Value v;
+    v["id"] = static_cast<Json::Int64>(id);
+    v["roomId"] = static_cast<Json::Int64>(roomId);
+    v["author"] = author.empty() ? Json::Value() : Json::Value(author);
+    v["text"] = text;
+    v["createdAt"] = static_cast<Json::Int64>(createdAt);
+    v["kind"] = kind;
+    v["todoId"] = idOrNull(todoId);
     return v;
 }
 
@@ -201,6 +242,8 @@ void TodoStore::load()
             t.deadline = v["deadline"].asString();
         t.description = v["description"].isString() ? v["description"].asString() : "";
         t.prunedAt = v["prunedAt"].asInt64();
+        t.roomId = v["roomId"].isNull() ? 0 : v["roomId"].asInt64();
+        t.claimedBy = v["claimedBy"].isString() ? v["claimedBy"].asString() : "";
         return t;
     };
     for (const auto &v : todos)
@@ -219,6 +262,31 @@ void TodoStore::load()
         nextCategoryId_ = std::max(nextCategoryId_, c.id + 1);
         categories_.push_back(std::move(c));
     }
+    for (const auto &v : root.isObject() ? root["rooms"] : Json::Value())
+    {
+        Room r;
+        r.id = v["id"].asInt64();
+        r.name = v["name"].asString();
+        r.topic = v["topic"].isString() ? v["topic"].asString() : "";
+        r.createdAt = v["createdAt"].asInt64();
+        for (const auto &m : v["members"])
+            r.members[m["name"].asString()] = m["lastSeen"].asInt64();
+        nextRoomId_ = std::max(nextRoomId_, r.id + 1);
+        rooms_.push_back(std::move(r));
+    }
+    for (const auto &v : root.isObject() ? root["messages"] : Json::Value())
+    {
+        Message m;
+        m.id = v["id"].asInt64();
+        m.roomId = v["roomId"].asInt64();
+        m.author = v["author"].isString() ? v["author"].asString() : "";
+        m.text = v["text"].asString();
+        m.createdAt = v["createdAt"].asInt64();
+        m.kind = v["kind"].asString() == "event" ? "event" : "message";
+        m.todoId = v["todoId"].isNull() ? 0 : v["todoId"].asInt64();
+        nextMessageId_ = std::max(nextMessageId_, m.id + 1);
+        messages_.push_back(std::move(m));
+    }
 }
 
 void TodoStore::save() const
@@ -227,6 +295,12 @@ void TodoStore::save() const
     root["todos"] = Json::Value(Json::arrayValue);
     root["categories"] = Json::Value(Json::arrayValue);
     root["pruned"] = Json::Value(Json::arrayValue);
+    root["rooms"] = Json::Value(Json::arrayValue);
+    root["messages"] = Json::Value(Json::arrayValue);
+    for (const auto &r : rooms_)
+        root["rooms"].append(r.toJson());
+    for (const auto &m : messages_)
+        root["messages"].append(m.toJson());
     for (const auto &t : todos_)
         root["todos"].append(t.toJson());
     for (const auto &t : pruned_)
@@ -263,18 +337,22 @@ std::vector<Todo> TodoStore::list(bool includeArchived) const
     return out;
 }
 
-Todo TodoStore::add(const std::string &title, const Todo &init)
+Todo TodoStore::add(const std::string &title, const Todo &init, const std::string &actor)
 {
     std::lock_guard<std::mutex> lock(mu_);
     checkCategoryExists(init.categoryId);
+    checkRoomExists(init.roomId);
     Todo t{freeId(todos_), title, false, nowSeconds(), init.categoryId, init.priority, init.deadline,
            init.description};
+    t.roomId = init.roomId;
     todos_.push_back(t);
+    event(t, actor, "added");
     save();
     return t;
 }
 
-std::optional<Todo> TodoStore::update(int64_t id, const TodoPatch &patch)
+std::optional<Todo> TodoStore::update(int64_t id, const TodoPatch &patch,
+                                      const std::string &actor)
 {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = std::find_if(todos_.begin(), todos_.end(), [id](const Todo &t) {
@@ -284,6 +362,9 @@ std::optional<Todo> TodoStore::update(int64_t id, const TodoPatch &patch)
         return std::nullopt;
     if (patch.categoryId)
         checkCategoryExists(*patch.categoryId);
+    if (patch.roomId)
+        checkRoomExists(*patch.roomId);
+    const Todo before = *it;
     if (patch.title)
         it->title = *patch.title;
     if (patch.done)
@@ -296,21 +377,69 @@ std::optional<Todo> TodoStore::update(int64_t id, const TodoPatch &patch)
         it->deadline = *patch.deadline;
     if (patch.description)
         it->description = *patch.description;
+    if (patch.roomId)
+        it->roomId = *patch.roomId;
+
+    if (it->roomId != before.roomId)
+    {
+        event(before, actor, "moved out of this room:");
+        event(*it, actor, "added");
+    }
+    else if (it->done != before.done)
+        event(*it, actor, it->done ? "finished" : "reopened");
     save();
     return *it;
 }
 
-bool TodoStore::remove(int64_t id)
+bool TodoStore::remove(int64_t id, const std::string &actor)
 {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = std::remove_if(todos_.begin(), todos_.end(), [id](const Todo &t) {
+    auto it = std::find_if(todos_.begin(), todos_.end(), [id](const Todo &t) {
         return t.id == id;
     });
     if (it == todos_.end())
         return false;
-    todos_.erase(it, todos_.end());
+    event(*it, actor, "deleted");
+    todos_.erase(it);
     save();
     return true;
+}
+
+Todo TodoStore::claim(int64_t id, const std::string &agent, bool force)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = std::find_if(todos_.begin(), todos_.end(), [id](const Todo &t) { return t.id == id; });
+    if (it == todos_.end())
+        throw StoreError(404, "todo not found");
+    if (it->claimedBy == agent)
+        return *it;
+    if (!it->claimedBy.empty() && !force)
+        throw StoreError(409, "already claimed by " + it->claimedBy);
+    const std::string previous = it->claimedBy;
+    it->claimedBy = agent;
+    event(*it, agent, previous.empty() ? "claimed" : "took over from " + previous + ":");
+    if (it->roomId)
+        if (Room *r = findRoomById(it->roomId))
+            r->members[agent] = nowSeconds();
+    save();
+    return *it;
+}
+
+Todo TodoStore::release(int64_t id, const std::string &agent, bool force)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = std::find_if(todos_.begin(), todos_.end(), [id](const Todo &t) { return t.id == id; });
+    if (it == todos_.end())
+        throw StoreError(404, "todo not found");
+    if (it->claimedBy.empty())
+        return *it;
+    if (it->claimedBy != agent && !force)
+        throw StoreError(409, "claimed by " + it->claimedBy + ", not you");
+    const std::string previous = it->claimedBy;
+    it->claimedBy.clear();
+    event(*it, agent, previous == agent ? "released" : "released " + previous + "'s claim on");
+    save();
+    return *it;
 }
 
 size_t TodoStore::clearDone()
@@ -347,6 +476,7 @@ Todo TodoStore::prune(int64_t id)
     Todo p = *it;
     p.id = freeId(pruned_);
     p.prunedAt = nowSeconds();
+    p.claimedBy.clear();
     todos_.erase(it);
     pruned_.push_back(p);
     save();
@@ -368,6 +498,7 @@ size_t TodoStore::pruneDone()
         Todo p = *it;
         p.id = freeId(pruned_);
         p.prunedAt = now;
+        p.claimedBy.clear();
         pruned_.push_back(p);
         it = todos_.erase(it);
         ++n;
@@ -387,6 +518,8 @@ Todo TodoStore::restore(int64_t prunedId)
     Todo t = *it;
     t.id = freeId(todos_);
     t.prunedAt = 0;
+    if (!findRoomById(t.roomId))
+        t.roomId = 0;
     pruned_.erase(it);
     todos_.push_back(t);
     save();
@@ -540,4 +673,186 @@ void TodoStore::removeCategory(int64_t id)
                                      [id](const Category &c) { return c.id == id; }),
                       categories_.end());
     save();
+}
+
+// ── Rooms ──
+
+Room *TodoStore::findRoomById(int64_t id)
+{
+    for (auto &r : rooms_)
+        if (r.id == id)
+            return &r;
+    return nullptr;
+}
+
+void TodoStore::checkRoomExists(int64_t id)
+{
+    if (id != 0 && !findRoomById(id))
+        throw StoreError(404, "room not found");
+}
+
+void TodoStore::checkRoomName(const std::string &name, int64_t selfId)
+{
+    const auto key = lower(name);
+    for (const auto &r : rooms_)
+        if (r.id != selfId && lower(r.name) == key)
+            throw StoreError(409, "a room named \"" + name + "\" already exists");
+}
+
+const Message &TodoStore::append(int64_t roomId, const std::string &author,
+                                 const std::string &text, const std::string &kind, int64_t todoId)
+{
+    const int64_t now = nowSeconds();
+    if (!author.empty())
+        if (Room *r = findRoomById(roomId))
+            r->members[author] = now;
+
+    // Drop the room's oldest message once it's over the limit.
+    size_t inRoom = 0;
+    for (const auto &m : messages_)
+        inRoom += m.roomId == roomId;
+    if (inRoom >= kMaxMessagesPerRoom)
+        messages_.erase(std::find_if(messages_.begin(), messages_.end(),
+                                     [roomId](const Message &m) { return m.roomId == roomId; }));
+
+    messages_.push_back({nextMessageId_++, roomId, author, text, now, kind, todoId});
+    if (listener_)
+        listener_(roomId);
+    return messages_.back();
+}
+
+void TodoStore::event(const Todo &t, const std::string &actor, const std::string &what)
+{
+    if (t.roomId && findRoomById(t.roomId))
+        append(t.roomId, actor, what + " " + label(t), "event", t.id);
+}
+
+void TodoStore::setMessageListener(std::function<void(int64_t)> fn)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    listener_ = std::move(fn);
+}
+
+std::vector<Room> TodoStore::listRooms() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return rooms_;
+}
+
+Room TodoStore::room(int64_t id) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto &r : rooms_)
+        if (r.id == id)
+            return r;
+    throw StoreError(404, "room not found");
+}
+
+Room TodoStore::findRoom(const std::string &ref) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    const std::string digits = !ref.empty() && ref[0] == '#' ? ref.substr(1) : ref;
+    const bool isId =
+        !digits.empty() && digits.find_first_not_of("0123456789") == std::string::npos;
+    const auto key = lower(ref);
+    for (const auto &r : rooms_)
+        if (isId ? std::to_string(r.id) == digits : lower(r.name) == key)
+            return r;
+    throw StoreError(404, "no room \"" + ref + "\"");
+}
+
+Room TodoStore::addRoom(const std::string &name, const std::string &topic)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    checkRoomName(name, 0);
+    Room r{nextRoomId_++, name, topic, nowSeconds()};
+    rooms_.push_back(r);
+    save();
+    return r;
+}
+
+Room TodoStore::updateRoom(int64_t id, const std::optional<std::string> &name,
+                           const std::optional<std::string> &topic)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    Room *r = findRoomById(id);
+    if (!r)
+        throw StoreError(404, "room not found");
+    if (name)
+    {
+        checkRoomName(*name, id);
+        r->name = *name;
+    }
+    if (topic)
+        r->topic = *topic;
+    save();
+    return *r;
+}
+
+Room TodoStore::removeMember(int64_t id, const std::string &name)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    Room *r = findRoomById(id);
+    if (!r)
+        throw StoreError(404, "room not found");
+    if (!r->members.erase(name))
+        throw StoreError(404, "no member named " + name);
+    save();
+    return *r;
+}
+
+void TodoStore::removeRoom(int64_t id)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!findRoomById(id))
+        throw StoreError(404, "room not found");
+    for (auto *list : {&todos_, &pruned_})
+        for (auto &t : *list)
+            if (t.roomId == id)
+                t.roomId = 0;
+    messages_.erase(std::remove_if(messages_.begin(), messages_.end(),
+                                   [id](const Message &m) { return m.roomId == id; }),
+                    messages_.end());
+    rooms_.erase(std::remove_if(rooms_.begin(), rooms_.end(),
+                                [id](const Room &r) { return r.id == id; }),
+                 rooms_.end());
+    save();
+}
+
+Message TodoStore::post(int64_t roomId, const std::string &author, const std::string &text)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    checkRoomExists(roomId);
+    Message m = append(roomId, author, text, "message", 0);
+    save();
+    return m;
+}
+
+std::vector<Message> TodoStore::messages(int64_t roomId, int64_t since, size_t limit) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<Message> out;
+    for (const auto &m : messages_)
+        if (m.roomId == roomId && m.id > since)
+            out.push_back(m);
+    if (out.size() > limit)
+        out.erase(out.begin(), out.end() - static_cast<std::ptrdiff_t>(limit));
+    return out;
+}
+
+int64_t TodoStore::lastMessageId(int64_t roomId) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    int64_t last = 0;
+    for (const auto &m : messages_)
+        if (m.roomId == roomId)
+            last = m.id;
+    return last;
+}
+
+void TodoStore::touch(int64_t roomId, const std::string &agent)
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    if (Room *r = findRoomById(roomId); r && !agent.empty())
+        r->members[agent] = nowSeconds();
 }

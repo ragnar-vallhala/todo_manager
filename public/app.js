@@ -9,20 +9,27 @@ const ALL = 'all';
 const INBOX = 'inbox';
 const ARCHIVE = 'archive';  // every archived category
 const PRUNED = 'pruned';    // done todos moved aside to free their ids
+const ROOM = 'room:';       // a room's view is ROOM + its id, e.g. 'room:3'
 
 let todos = [];
 let cats = [];
 let pruned = [];  // their ids are separate from todos' (p1, p2...)
-let view = ALL;           // ALL, INBOX, ARCHIVE, or a category id
+let rooms = [];
+let roomsLoaded = false;
+let view = ALL;           // ALL, INBOX, ARCHIVE, PRUNED, a category id or ROOM + id
 let seen = null;          // ids already on screen, so only new rows animate in
 let showDone = false;
 let showArchive = false;  // the sidebar's Archived section is unfolded
 let collapsed = new Set();
+let me = 'human';         // your name in rooms
+let lastRead = {};        // room id -> the newest message id you've seen there
 
 try {
   showDone = localStorage.getItem('showDone') === '1';
   showArchive = localStorage.getItem('showArchive') === '1';
   collapsed = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'));
+  me = localStorage.getItem('agentName') || 'human';
+  lastRead = JSON.parse(localStorage.getItem('roomRead') || '{}');
 } catch {}
 
 function remember() {
@@ -30,20 +37,30 @@ function remember() {
     localStorage.setItem('showDone', showDone ? '1' : '0');
     localStorage.setItem('showArchive', showArchive ? '1' : '0');
     localStorage.setItem('collapsed', JSON.stringify([...collapsed]));
+    localStorage.setItem('agentName', me);
+    localStorage.setItem('roomRead', JSON.stringify(lastRead));
   } catch {}
 }
 
 // ── API ──
 
-async function api(method, path, body) {
+async function api(method, path, body, { signal } = {}) {
   let res;
+  // Says who you are, so changes to room todos are announced under your name.
+  // Header values must be ASCII; other names go in ?agent= instead.
+  const ascii = /^[\x20-\x7e]+$/.test(me);
+  const headers = ascii ? { 'X-Todo-Agent': me } : {};
+  if (!ascii && me) path += (path.includes('?') ? '&' : '?') + 'agent=' + encodeURIComponent(me);
+  if (body) headers['Content-Type'] = 'application/json';
   try {
     res = await fetch('/api' + path, {
       method,
-      headers: body ? { 'Content-Type': 'application/json' } : {},
+      headers,
       body: body ? JSON.stringify(body) : undefined,
+      signal,
     });
-  } catch {
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
     throw new Error("Can't reach the todo server. Check that it's running, then try again.");
   }
   if (!res.ok) {
@@ -73,8 +90,10 @@ async function run(fn) {
 // Everything, archived included; views filter it (see inView).
 async function fetchAll() {
   const first = !cats.length;
-  [todos, cats, pruned] = await Promise.all([
-    api('GET', '/todos?archived=1'), api('GET', '/categories?archived=1'), api('GET', '/pruned')]);
+  [todos, cats, pruned, rooms] = await Promise.all([
+    api('GET', '/todos?archived=1'), api('GET', '/categories?archived=1'), api('GET', '/pruned'),
+    api('GET', '/rooms')]);
+  roomsLoaded = true;
   if (first) revealArchive();  // opened on an archived category's link
 }
 
@@ -158,8 +177,25 @@ function flatten(parentId = null, depth = 0, out = [], skipCollapsed = false) {
   return out;
 }
 
+// ── Rooms ──
+
+const isRoom = (v = view) => typeof v === 'string' && v.startsWith(ROOM);
+const roomIdOf = (v = view) => (isRoom(v) ? Number(v.slice(ROOM.length)) : null);
+const findRoom = (id) => rooms.find((r) => r.id === id);
+const unread = (r) => r.lastMessageId > (lastRead[r.id] || 0);
+
+// "just now", "5m ago", "3h ago", "2d ago".
+function ago(seconds) {
+  const s = Math.max(0, Date.now() / 1000 - seconds);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
 // Archived todos only show up inside archived categories.
 function inView(todo, v = view) {
+  if (isRoom(v)) return todo.roomId === roomIdOf(v);
   if (v === ALL) return !inArchive(todo.categoryId);
   if (v === INBOX) return todo.categoryId == null;
   if (v === ARCHIVE) return inArchive(todo.categoryId);
@@ -211,12 +247,15 @@ function readHash() {
   if (h === '#/inbox') return INBOX;
   if (h === '#/archived') return ARCHIVE;
   if (h === '#/pruned') return PRUNED;
+  const r = h.match(/^#\/r\/(\d+)$/);
+  if (r) return ROOM + r[1];
   const m = h.match(/^#\/c\/(\d+)$/);
   return m ? Number(m[1]) : ALL;
 }
 
 function go(v) {
-  const hash = v === ALL ? '#/' : v === INBOX ? '#/inbox' : v === ARCHIVE ? '#/archived' : v === PRUNED ? '#/pruned' : `#/c/${v}`;
+  const hash = v === ALL ? '#/' : v === INBOX ? '#/inbox' : v === ARCHIVE ? '#/archived' : v === PRUNED ? '#/pruned'
+    : isRoom(v) ? `#/r/${roomIdOf(v)}` : `#/c/${v}`;
   if (location.hash !== hash) history.pushState(null, '', hash);
   view = v;
   revealArchive();
@@ -241,10 +280,13 @@ function render() {
   // Don't rebuild the list under someone who is mid-edit.
   if (document.querySelector('.item .edit')) return;
   if (typeof view === 'number' && cats.length && !findCat(view)) view = ALL;
+  if (isRoom() && roomsLoaded && !findRoom(roomIdOf())) view = ALL;
 
+  syncPoll();
   renderSidebar();
   renderHeader();
   renderTodos();
+  renderRoom();
   seen = new Set(todos.map((t) => t.id));
 }
 
@@ -277,6 +319,11 @@ function navRow(v, name, { depth = 0, fold = null } = {}) {
   const item = el('button', { className: 'nav-item' },
     el('span', { className: 'nav-name', textContent: name }),
     el('span', { className: 'nav-count', textContent: n || '' }));
+  const room = findRoom(roomIdOf(v));
+  if (room && unread(room) && v !== view) {
+    item.classList.add('unread');
+    item.title = 'New messages';
+  }
   if (v === view) item.setAttribute('aria-current', 'page');
   if (typeof v === 'number') paintCat(item, v, true);
   item.addEventListener('click', () => go(v));
@@ -326,6 +373,10 @@ function renderSidebar() {
   }
   if (pruned.length || view === PRUNED) rows.push(navRow(PRUNED, 'Pruned'));
   $('#nav-archive').replaceChildren(...rows);
+
+  const roomRows = rooms.slice().sort(byName).map((r) => navRow(ROOM + r.id, r.name));
+  if (roomRows.length) roomRows.unshift(el('li', { className: 'nav-heading', textContent: 'Rooms' }));
+  $('#nav-rooms').replaceChildren(...roomRows);
 }
 
 function renderHeader() {
@@ -334,6 +385,11 @@ function renderHeader() {
     crumbs.replaceChildren(el('span', {
       textContent: new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
     }));
+  } else if (isRoom()) {
+    const room = findRoom(roomIdOf());
+    crumbs.replaceChildren(el('span', { textContent: 'Rooms' }),
+      el('span', { className: 'sep', textContent: '/', ariaHidden: 'true' }),
+      el('span', { className: 'here', textContent: room ? room.name : '' }));
   } else if (view === INBOX || view === ARCHIVE || view === PRUNED) {
     const label = { [INBOX]: 'Inbox', [ARCHIVE]: 'Archived', [PRUNED]: 'Pruned' }[view];
     crumbs.replaceChildren(el('span', { className: 'here', textContent: label }));
@@ -355,16 +411,19 @@ function renderHeader() {
 
   const open = openIn(view);
   $('#open-count').textContent = open ? `${open} open` : '';
-  $('#cat-menu-btn').hidden = typeof view !== 'number';
+  $('#cat-menu-btn').hidden = typeof view !== 'number' && !isRoom();
+  $('#cat-menu-btn .visually-hidden').textContent = isRoom() ? 'Room options' : 'Category options';
+  for (const b of menu.querySelectorAll('[data-action]')) b.hidden = b.dataset.action.startsWith('room-') !== isRoom();
   const cat = findCat(view);
-  $('#new-title').placeholder = cat ? `Add to ${cat.name}` : "What's next?";
+  const room = findRoom(roomIdOf());
+  $('#new-title').placeholder = cat ? `Add to ${cat.name}` : room ? `Add to ${room.name}` : "What's next?";
   $('#add-form').hidden = view === ARCHIVE || view === PRUNED;
   $('#clear-done').hidden = viewArchived();  // the server keeps archived todos anyway
 
   // Only the archived category itself can be unarchived, not one inside it.
   const archiveItem = $('[data-action="archive"]', menu);
   archiveItem.textContent = cat?.archived ? 'Unarchive' : 'Archive';
-  archiveItem.hidden = !cat || (!cat.archived && inArchive(cat.id));
+  if (!isRoom()) archiveItem.hidden = !cat || (!cat.archived && inArchive(cat.id));
 }
 
 function renderTodos() {
@@ -380,7 +439,7 @@ function renderTodos() {
   if (view === ALL) {
     groups.push({ id: null, todos: direct(null) });
     for (const { cat } of flatten()) groups.push({ id: cat.id, title: pathName(cat.id), todos: direct(cat.id) });
-  } else if (view === INBOX) {
+  } else if (view === INBOX || isRoom()) {
     groups.push({ id: null, todos: open });
   } else if (view === ARCHIVE) {
     for (const root of archiveRoots()) {
@@ -401,13 +460,15 @@ function renderTodos() {
       if (styleOf(g.id)) link.style.color = 'inherit';
       section.append(heading);
     }
-    section.append(el('ul', { className: 'list' }, ...g.todos.map((t) => renderItem(t, false))));
+    section.append(el('ul', { className: 'list' }, ...g.todos.map((t) => renderItem(t, isRoom()))));
     return section;
   }));
 
   const empty = $('#empty');
   empty.hidden = open.length > 0;
-  empty.textContent = view === ARCHIVE
+  empty.textContent = isRoom()
+    ? 'No open todos in this room. Add one above, or drop a todo on the room in the sidebar.'
+    : view === ARCHIVE
     ? (archiveRoots().length ? 'Nothing open in archived categories.'
                              : 'Nothing archived. Archive a category from its ⋯ menu.')
     : view === ALL && !todos.length
@@ -522,6 +583,27 @@ function renderItem(todo, showTag) {
     $('.tag', li).textContent = pathName(todo.categoryId, typeof view === 'number' ? view : null);
   }
 
+  // Rooms: which room it's shared in, who has claimed it, and claim / release.
+  const room = findRoom(todo.roomId);
+  if (room && !isRoom()) {
+    const tag = $('.room-tag', li);
+    tag.textContent = '# ' + room.name;
+    tag.title = `In room ${room.name}`;
+  }
+  if (todo.claimedBy) {
+    const badge = $('.claimed', li);
+    badge.textContent = todo.claimedBy === me ? 'you' : todo.claimedBy;
+    badge.title = `Claimed by ${todo.claimedBy}`;
+    badge.classList.toggle('mine', todo.claimedBy === me);
+  }
+  const claim = $('.claim', li);
+  claim.hidden = todo.done || (!room && !todo.claimedBy);
+  const label = !todo.claimedBy ? 'Claim' : todo.claimedBy === me ? 'Release' : `Release ${todo.claimedBy}'s claim`;
+  claim.setAttribute('aria-label', label);
+  claim.title = label;
+  claim.classList.toggle('held', !!todo.claimedBy);
+  claim.addEventListener('click', () => claimTodo(todo));
+
   $('.move', li).addEventListener('click', () => moveTodo(todo));
   $('.delete', li).addEventListener('click', () => run(async () => {
     await api('DELETE', `/todos/${todo.id}`);
@@ -535,6 +617,22 @@ function renderItem(todo, showTag) {
   });
   li.addEventListener('dragend', () => { dragging = null; li.classList.remove('dragging'); });
   return li;
+}
+
+// Claims an unclaimed todo, or releases a claim (someone else's after asking).
+async function claimTodo(todo) {
+  let action = 'claim', force = false;
+  if (todo.claimedBy) {
+    action = 'release';
+    if (todo.claimedBy !== me) {
+      force = await confirmDialog(`Release ${todo.claimedBy}'s claim?`,
+        `${todo.claimedBy} may still be working on “${todo.title}”. Releasing lets anyone claim it.`, 'Release');
+      if (!force) return;
+    }
+  }
+  run(async () => {
+    Object.assign(todo, await api('POST', `/todos/${todo.id}/${action}`, { agent: me, force }));
+  });
 }
 
 function startEdit(title, todo) {
@@ -567,6 +665,7 @@ let dragging = null;  // { kind: 'todo' | 'cat', id }
 
 function canDrop(v) {
   if (v === PRUNED) return false;
+  if (isRoom(v)) return dragging.kind === 'todo';  // shares it in the room
   // Dropping a category on Archived archives it.
   if (v === ARCHIVE) return dragging.kind === 'cat' && !inArchive(dragging.id);
   if (dragging.kind === 'todo') return v !== ALL;
@@ -579,7 +678,9 @@ function dropOn(v) {
   const d = dragging;
   dragging = null;
   if (!d) return;
-  if (d.kind === 'todo') {
+  if (d.kind === 'todo' && isRoom(v)) {
+    run(() => api('PATCH', `/todos/${d.id}`, { roomId: roomIdOf(v) }).then(fetchAll));
+  } else if (d.kind === 'todo') {
     run(() => api('PATCH', `/todos/${d.id}`, { categoryId: v === INBOX ? null : v }).then(fetchAll));
   } else if (v === ARCHIVE) {
     run(() => api('PATCH', `/categories/${d.id}`, { archived: true }).then(fetchAll));
@@ -954,6 +1055,7 @@ menu.addEventListener('click', async (e) => {
   const action = e.target.closest('button')?.dataset.action;
   const cat = findCat(view);
   toggleMenu(false);
+  if (action?.startsWith('room-')) return roomAction(action);
   if (!action || !cat) return;
 
   if (action === 'add-sub') return newCategory(cat.id);
@@ -1003,6 +1105,315 @@ menu.addEventListener('click', async (e) => {
   }
 });
 
+// ── Room view: topic, members, message log ──
+
+let log = { roomId: null, messages: [] };  // the open room's messages, oldest first
+let poll = null;                           // { roomId, ctl: AbortController }
+
+// Asks for multi-line text; resolves with it (maybe empty), or undefined if cancelled.
+function promptText(title, value, confirmLabel, placeholder) {
+  return openDialog((close) => {
+    const area = el('textarea', { value, maxLength: 500, placeholder });
+    area.setAttribute('aria-label', title);
+    const form = el('form', {}, area, actions(close, confirmLabel));
+    form.addEventListener('submit', (e) => { e.preventDefault(); close(area.value.trim()); });
+    area.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+    });
+    setTimeout(() => area.select());
+    return [el('h2', { textContent: title }), form];
+  });
+}
+
+async function newRoom() {
+  await promptName('New room', '', 'Create', async (name) => {
+    const room = await api('POST', '/rooms', { name });
+    await fetchAll();
+    go(ROOM + room.id);
+  });
+}
+
+async function roomAction(action) {
+  const room = findRoom(roomIdOf());
+  if (!room) return;
+  if (action === 'room-rename') {
+    await promptName(`Rename ${room.name}`, room.name, 'Rename', async (name) => {
+      await api('PATCH', `/rooms/${room.id}`, { name });
+      await fetchAll();
+    });
+    return render();
+  }
+  if (action === 'room-topic') {
+    const topic = await promptText(`Topic for ${room.name}`, room.topic ?? '', 'Save', 'What this room is for');
+    if (topic === undefined) return;
+    return run(async () => {
+      await api('PATCH', `/rooms/${room.id}`, { topic: topic || null });
+      await fetchAll();
+    });
+  }
+  if (action === 'room-delete') {
+    const ok = await confirmDialog(`Delete ${room.name}?`,
+      'Its messages are deleted. Its todos stay, just not in a room.', 'Delete room');
+    if (!ok) return;
+    run(async () => {
+      await api('DELETE', `/rooms/${room.id}`);
+      await fetchAll();
+      go(ALL);
+    });
+  }
+}
+
+async function changeName() {
+  await promptName('Your name in rooms', me, 'Save', async (name) => {
+    me = name.slice(0, 40);
+    remember();
+  });
+  render();
+}
+
+function renderRoom() {
+  const room = findRoom(roomIdOf());
+  $('#room-info').hidden = !room;
+  $('#room-log-section').hidden = !room;
+  if (!room) return;
+
+  const topic = $('#room-topic');
+  topic.textContent = room.topic || 'No topic yet.';
+  topic.classList.toggle('none', !room.topic);
+
+  // Most recently seen first; you're always listed.
+  const members = room.members.slice().sort((a, b) => b.lastSeen - a.lastSeen);
+  const you = el('button', { className: 'member you', textContent: `${me} (you)`, title: 'Change your name' });
+  you.addEventListener('click', changeName);
+  $('#room-members').replaceChildren(you, ...members.filter((m) => m.name !== me).map((m) => {
+    // Forgetting a member stops @suggestions of them; they rejoin if they come back.
+    const forget = el('button', { className: 'forget', ariaLabel: `Remove ${m.name} from the room`,
+      title: `Remove ${m.name} (they rejoin if they post or check the room again)` });
+    forget.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 5l6 6M11 5l-6 6"/></svg>';
+    forget.addEventListener('click', () => run(async () => {
+      await api('DELETE', `/rooms/${room.id}/members?name=${encodeURIComponent(m.name)}`);
+      await fetchAll();
+    }));
+    return el('span', { className: 'member', title: `Last seen ${new Date(m.lastSeen * 1000).toLocaleString()}` },
+      m.name, el('span', { className: 'seen', textContent: ' · ' + ago(m.lastSeen) }), forget);
+  }));
+
+  $('#room-text').placeholder = `Message as ${me}. Enter sends, Shift+Enter for a new line`;
+  renderLog();
+}
+
+// A stable color per name, so each author and their @mentions read alike.
+function nameHue(name) {
+  let h = 2166136261;  // FNV-1a, then spread so similar names differ
+  for (const c of name.toLowerCase()) h = Math.imul(h ^ c.codePointAt(0), 16777619);
+  h ^= h >>> 15;
+  return (Math.imul(h, 2246822507) >>> 0) % 360;
+}
+
+// Message text with @mentions and #refs picked out in color.
+function richText(text) {
+  const out = [];
+  const re = /(^|[^\w@#])(@[\w-]+(?:\.[\w-]+)*|#\d+)/g;
+  let last = 0;
+  for (let m; (m = re.exec(text));) {
+    const start = m.index + m[1].length;
+    out.push(text.slice(last, start));
+    const tok = m[2];
+    if (tok[0] === '@') {
+      const span = el('span', { className: 'mention', textContent: tok });
+      span.style.setProperty('--hue', nameHue(tok.slice(1)));
+      if (tok.slice(1) === me) span.classList.add('me');
+      out.push(span);
+    } else {
+      out.push(el('span', { className: 'ref', textContent: tok }));
+    }
+    last = start + tok.length;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+
+function renderLog() {
+  const box = $('#room-log');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  const msgs = log.roomId === roomIdOf() ? log.messages : [];
+  box.replaceChildren(...msgs.map((m) => {
+    const time = el('time', {
+      className: 'msg-time',
+      textContent: new Date(m.createdAt * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+      title: new Date(m.createdAt * 1000).toLocaleString(),
+    });
+    const author = el('span', { className: 'msg-author', textContent: m.author ?? 'server' });
+    if (m.author === me) author.classList.add('mine');
+    else if (m.author) author.style.setProperty('--hue', nameHue(m.author));
+    if (m.kind === 'event') return el('li', { className: 'msg event' }, author, ' ', el('span', {}, ...richText(m.text)), time);
+    return el('li', { className: 'msg' }, el('div', { className: 'msg-head' }, author, time),
+      el('p', { className: 'msg-text' }, ...richText(m.text)));
+  }));
+  $('#room-log-empty').hidden = msgs.length > 0;
+  if (atBottom || box.dataset.room !== String(log.roomId)) box.scrollTop = box.scrollHeight;
+  box.dataset.room = String(log.roomId);
+  markRead();
+}
+
+// Messages on screen count as read while the page is visible.
+function markRead() {
+  const id = roomIdOf();
+  if (id == null || log.roomId !== id || document.hidden || !log.messages.length) return;
+  const last = log.messages[log.messages.length - 1].id;
+  if ((lastRead[id] || 0) >= last) return;
+  lastRead[id] = last;
+  remember();
+}
+
+// Adds messages (skipping ones already there); true if any were events.
+function addMessages(msgs) {
+  const have = new Set(log.messages.map((m) => m.id));
+  const fresh = msgs.filter((m) => !have.has(m.id));
+  log.messages.push(...fresh);
+  log.messages.sort((a, b) => a.id - b.id);
+  const room = findRoom(log.roomId);
+  if (room && fresh.length) room.lastMessageId = Math.max(room.lastMessageId, ...fresh.map((m) => m.id));
+  return fresh.some((m) => m.kind === 'event');
+}
+
+// Keeps one long poll running for the open room: it loads the recent
+// messages, then waits for new ones until you leave the room.
+function syncPoll() {
+  const id = roomIdOf();
+  if (poll?.roomId === id) return;
+  poll?.ctl.abort();
+  poll = null;
+  if (id == null) return;
+  poll = { roomId: id, ctl: new AbortController() };
+  if (log.roomId !== id) log = { roomId: id, messages: [] };
+  pollLoop(poll);
+}
+
+async function pollLoop(p) {
+  const { signal } = p.ctl;
+  const agent = encodeURIComponent(me);
+  let delay = 1000;
+  try {
+    addMessages(await api('GET', `/rooms/${p.roomId}/messages?limit=200&agent=${agent}`, null, { signal }));
+    renderLog();
+  } catch (e) {
+    if (signal.aborted) return;
+  }
+  while (!signal.aborted) {
+    const since = log.messages.length ? log.messages[log.messages.length - 1].id : 0;
+    try {
+      const msgs = await api('GET', `/rooms/${p.roomId}/messages?since=${since}&wait=25&agent=${agent}`, null, { signal });
+      delay = 1000;
+      if (signal.aborted || log.roomId !== p.roomId) return;
+      if (addMessages(msgs)) await fetchAll();  // a room todo changed
+      render();
+    } catch (e) {
+      if (signal.aborted) return;
+      // Server down or restarting: wait a bit longer each time.
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, 30000);
+    }
+  }
+}
+
+$('#room-post').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const box = $('#room-text');
+  const text = box.value.trim();
+  const id = roomIdOf();
+  if (!text || id == null) return;
+  run(async () => {
+    const msg = await api('POST', `/rooms/${id}/messages`, { text, author: me });
+    box.value = '';
+    updateMentions();
+    if (log.roomId === id) addMessages([msg]);
+  });
+});
+// ── @mentions: suggest the room's members while typing "@name" ──
+
+const mention = { matches: [], sel: 0 };
+
+// The "@..." word the caret is at the end of, or null.
+function mentionWord(box) {
+  const before = box.value.slice(0, box.selectionStart);
+  const m = /(^|\s)@([^\s@]*)$/.exec(before);
+  return box.selectionStart === box.selectionEnd && m ? { start: before.length - m[2].length - 1, prefix: m[2] } : null;
+}
+
+function updateMentions() {
+  const box = $('#room-text');
+  const word = mentionWord(box);
+  const room = findRoom(roomIdOf());
+  let matches = [];
+  if (word && room) {
+    const prefix = word.prefix.toLowerCase();
+    matches = room.members
+      .filter((m) => m.name !== me && m.name.toLowerCase().startsWith(prefix))
+      .sort((a, b) => b.lastSeen - a.lastSeen);
+    // Nothing left to complete once it's typed out in full.
+    if (matches.length === 1 && matches[0].name.toLowerCase() === prefix) matches = [];
+  }
+  mention.matches = matches;
+  mention.sel = Math.min(mention.sel, Math.max(matches.length - 1, 0));
+  const list = $('#mentions');
+  list.hidden = !matches.length;
+  list.replaceChildren(...matches.map((m, i) => {
+    const li = el('li', { role: 'option' }, '@' + m.name, el('span', { className: 'seen', textContent: ' · ' + ago(m.lastSeen) }));
+    li.setAttribute('aria-selected', String(i === mention.sel));
+    // mousedown, not click, so the box keeps focus.
+    li.addEventListener('mousedown', (e) => { e.preventDefault(); insertMention(i); });
+    return li;
+  }));
+  list.children[mention.sel]?.scrollIntoView({ block: 'nearest' });
+}
+
+function insertMention(i) {
+  const box = $('#room-text');
+  const word = mentionWord(box);
+  const m = mention.matches[i];
+  if (!word || !m) return;
+  const text = '@' + m.name + ' ';
+  box.setRangeText(text, word.start, box.selectionStart, 'end');
+  mention.sel = 0;
+  updateMentions();
+}
+
+$('#room-text').addEventListener('input', () => { mention.sel = 0; updateMentions(); });
+$('#room-text').addEventListener('click', updateMentions);
+$('#room-text').addEventListener('keyup', (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMentions();
+});
+$('#room-text').addEventListener('blur', () => { $('#mentions').hidden = true; });
+$('#room-text').addEventListener('keydown', (e) => {
+  // While suggestions show: ↑/↓ pick one, Tab or Enter puts it in, Esc closes.
+  if (!$('#mentions').hidden && !e.isComposing) {
+    const n = mention.matches.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      mention.sel = (mention.sel + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+      updateMentions();
+      return;
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+      e.preventDefault();
+      insertMention(mention.sel);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      $('#mentions').hidden = true;
+      return;
+    }
+  }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    $('#room-post').requestSubmit();
+  }
+  if (e.key === 'Escape') e.target.blur();
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { markRead(); render(); } });
+
 // ── Other events ──
 
 $('#add-form').addEventListener('submit', (e) => {
@@ -1011,12 +1422,14 @@ $('#add-form').addEventListener('submit', (e) => {
   const title = input.value.trim();
   if (!title) return;
   run(async () => {
-    todos.push(await api('POST', '/todos', { title, categoryId: viewTarget() }));
+    const body = isRoom() ? { title, roomId: roomIdOf() } : { title, categoryId: viewTarget() };
+    todos.push(await api('POST', '/todos', body));
     input.value = '';
   });
 });
 
 $('#new-category').addEventListener('click', () => newCategory(null));
+$('#new-room').addEventListener('click', newRoom);
 $('#theme-btn').addEventListener('click', pickTheme);
 
 $('#nav-toggle').addEventListener('click', () => {

@@ -63,4 +63,26 @@ inline bool parseRef(const Json::Value &body, const char *key, std::optional<int
         return false;
     return true;
 }
+// Who is making the request: `body[key]` if given, else the X-Todo-Agent
+// header, else `?agent=`. Names are self-declared; there's no auth.
+// Returns "" if none was given; sets `err` if the one given is invalid.
+inline std::string agent(const drogon::HttpRequestPtr &req, const Json::Value *body,
+                         const char *key, std::string &err)
+{
+    std::string name;
+    if (body && body->isMember(key))
+    {
+        if (!(*body)[key].isString())
+            return err = std::string(key) + " must be a string", "";
+        name = (*body)[key].asString();
+    }
+    else if (!req->getHeader("x-todo-agent").empty())
+        name = req->getHeader("x-todo-agent");
+    else
+        name = req->getParameter("agent");
+    name = trim(name);
+    if (name.size() > 40 || name.find_first_of("\r\n\t") != std::string::npos)
+        return err = "agent names are 1-40 characters on one line", "";
+    return name;
+}
 }  // namespace http

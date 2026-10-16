@@ -626,6 +626,30 @@ class LineEdit
         }
     }
 
+    // The word the cursor is at the end of ("" after a space).
+    std::string wordBeforeCursor() const
+    {
+        size_t b = cur_;
+        while (b > 0 && chars_[b - 1] != " ")
+            --b;
+        std::string w;
+        for (size_t i = b; i < cur_; ++i)
+            w += chars_[i];
+        return w;
+    }
+
+    // Replaces that word with `word`.
+    void replaceWordBeforeCursor(const std::string &word)
+    {
+        size_t b = cur_;
+        while (b > 0 && chars_[b - 1] != " ")
+            --b;
+        chars_.erase(chars_.begin() + b, chars_.begin() + cur_);
+        auto add = splitUtf8(word);
+        chars_.insert(chars_.begin() + b, add.begin(), add.end());
+        cur_ = b + add.size();
+    }
+
     // Draws into `width` columns at (x, y), scrolled so the cursor is
     // visible. Returns the cursor's screen column.
     int draw(Canvas &c, int x, int y, int width, Style st) const
@@ -662,10 +686,15 @@ enum class Mode
     RenameCategory,
     StyleCategory,
     SetDeadline,
+    AddRoom,
+    RenameRoom,
+    RoomTopic,
+    PostMessage,
     Search,
     Pick,
     ConfirmDeleteTodo,
     ConfirmDeleteCategory,
+    ConfirmDeleteRoom,
     ConfirmClear,
     Help,
 };
@@ -676,6 +705,13 @@ enum class PickFor { ShowCategory, MoveTodo, MoveCategory, Priority, Theme };
 constexpr int64_t kAll = -1;      // every todo not in the archive
 constexpr int64_t kInbox = 0;     // todos without a category
 constexpr int64_t kArchive = -2;  // archived categories, listed last
+constexpr int64_t kRooms = -3;    // every todo shared in a room
+// Room N's row is kRoomBase - N, so it can't clash with the ones above.
+constexpr int64_t kRoomBase = -1000;
+
+bool isRoomView(int64_t view) { return view <= kRoomBase; }
+int64_t roomView(int64_t roomId) { return kRoomBase - roomId; }
+int64_t roomOf(int64_t view) { return isRoomView(view) ? kRoomBase - view : 0; }
 
 std::string formatTime(int64_t t)
 {
@@ -756,6 +792,17 @@ class App
             pruned_ = api_.listPruned();
             tree_ = api_.categories(true);
             online_ = true;
+            try
+            {
+                rooms_ = api_.rooms();
+            }
+            catch (const ApiError &e)
+            {
+                if (e.offline)
+                    throw;
+                rooms_.clear();  // a server without rooms
+            }
+            refreshLog();
         }
         catch (const ApiError &e)
         {
@@ -764,6 +811,44 @@ class App
             online_ = !e.offline;
         }
         syncSelection();
+    }
+
+    // Loads the log of the room being viewed: all of it (the last 200) when
+    // it's a different room, else what's new since last time.
+    void refreshLog()
+    {
+        const int64_t room = roomOf(catSelId_);
+        if (!room)
+        {
+            log_.clear();
+            logRoom_ = 0;
+            return;
+        }
+        if (room != logRoom_)
+        {
+            log_ = api_.messages(room, 0, 200);
+            logRoom_ = room;
+            logFollow_ = true;
+            return;
+        }
+        auto more = api_.messages(room, log_.empty() ? 0 : log_.back().id, 200);
+        log_.insert(log_.end(), more.begin(), more.end());
+        if (log_.size() > 500)
+            log_.erase(log_.begin(), log_.end() - 500);
+    }
+
+    const RoomItem *findRoom(int64_t id) const
+    {
+        for (const auto &r : rooms_)
+            if (r.id == id)
+                return &r;
+        return nullptr;
+    }
+
+    std::string roomName(int64_t id) const
+    {
+        const auto *r = findRoom(id);
+        return r ? r->name : "room " + std::to_string(id);
     }
 
     // Runs an API action, reports failures, reloads. Returns true on success.
@@ -802,6 +887,10 @@ class App
             return t.categoryId == 0;
         if (view == kArchive)
             return tree_.inArchive(t.categoryId);
+        if (view == kRooms)
+            return t.roomId != 0;
+        if (isRoomView(view))
+            return t.roomId == roomOf(view);
         return tree_.isWithin(t.categoryId, view) &&
                (tree_.inArchive(view) || !tree_.inArchive(t.categoryId));
     }
@@ -819,20 +908,29 @@ class App
 
     std::string viewName(int64_t view) const
     {
-        return view == kAll       ? "All"
-               : view == kInbox   ? "Inbox"
-               : view == kArchive ? "Archived"
-                                  : tree_.path(view);
+        return view == kAll        ? "All"
+               : view == kInbox    ? "Inbox"
+               : view == kArchive  ? "Archived"
+               : view == kRooms    ? "Rooms"
+               : isRoomView(view)  ? "Room " + roomName(roomOf(view))
+                                   : tree_.path(view);
     }
 
     // Where new todos/subcategories go: the selected category, else none.
     int64_t target() const { return catSelId_ > 0 ? catSelId_ : 0; }
+    // The room new todos are shared in: the selected one, else none.
+    int64_t targetRoom() const { return roomOf(catSelId_); }
 
     std::vector<CatRow> catRows() const
     {
         std::vector<CatRow> rows{{kAll, "All", 0, false, false},
                                  {kInbox, "Inbox", 0, false, false}};
         addCatRows(0, 0, false, rows);
+        // Rooms always show, so there's somewhere to create the first one.
+        rows.push_back({kRooms, "Rooms", 0, !rooms_.empty(), false});
+        if (!collapsed_.count(kRooms))
+            for (const auto &r : rooms_)
+                rows.push_back({roomView(r.id), r.name, 1, false, false});
         const auto archived = tree_.archiveRoots();
         if (archived.empty())
             return rows;
@@ -926,6 +1024,8 @@ class App
         }
         if (idx < 0 && catSelId_ > 0 && tree_.inArchive(catSelId_))
             idx = findRow(kArchive);
+        if (idx < 0 && isRoomView(catSelId_))  // folded or deleted
+            idx = findRow(kRooms);
         catSel_ = idx < 0 ? 0 : static_cast<size_t>(idx);
         catSelId_ = rows[catSel_].id;
 
@@ -959,10 +1059,14 @@ class App
             collapsed_.erase(c->parentId);
         if (id > 0 && tree_.inArchive(id))
             collapsed_.erase(kArchive);
+        if (isRoomView(id))
+            collapsed_.erase(kRooms);
         catSelId_ = id;
         sel_ = 0;
         selId_ = 0;
         syncSelection();
+        if (roomOf(catSelId_) != logRoom_)
+            reload();  // shows the room's log
     }
 
     void moveCatSel(long delta)
@@ -1181,11 +1285,19 @@ class App
             case Mode::AddCategory:
             case Mode::RenameCategory:
             case Mode::StyleCategory:
-            case Mode::SetDeadline: handleInput(k); break;
+            case Mode::SetDeadline:
+            case Mode::AddRoom:
+            case Mode::RenameRoom:
+            case Mode::RoomTopic:
+            case Mode::PostMessage:
+                if (!handleMention(k))
+                    handleInput(k);
+                break;
             case Mode::Search: handleSearch(k); break;
             case Mode::Pick: handlePick(k); break;
             case Mode::ConfirmDeleteTodo:
             case Mode::ConfirmDeleteCategory:
+            case Mode::ConfirmDeleteRoom:
             case Mode::ConfirmClear: handleConfirm(k); break;
         }
     }
@@ -1202,8 +1314,16 @@ class App
             focus_ = order[i];
         };
 
+        // The arrows follow the layout: details sits under the todos, so
+        // moving down off the last todo goes there, and up off its top
+        // comes back. ← / → reach the side panel and the todos.
+        const bool lastTodo = sel_ + 1 >= visible().size();
+        if (wide_ && focus_ == Focus::Todos && on("down") && lastTodo)
+            focus_ = Focus::Details;
+        else if (focus_ == Focus::Details && on("up") && detailsOffset_ == 0)
+            focus_ = Focus::Todos;
         // Moving through a list comes first: in details it scrolls.
-        if (focus_ == Focus::Details && scrollDetails(k))
+        else if (focus_ == Focus::Details && scrollDetails(k))
             ;
         else if (on("quit"))
             quit_ = true;
@@ -1269,6 +1389,17 @@ class App
         }
         else if (on("theme"))
             openThemePicker();
+        else if (on("room_say"))
+        {
+            // The room being viewed, else the selected todo's.
+            const TodoItem *cur = selected();
+            sayRoom_ = targetRoom() ? targetRoom() : cur ? cur->roomId : 0;
+            if (!sayRoom_)
+                return flash("Select a room (under Rooms) to post in", true);
+            if (api_.agent().empty())
+                return flash("Say who you are first: todo --as NAME, or $TODO_AGENT", true);
+            startInput(Mode::PostMessage, "");
+        }
         else if (focus_ == Focus::Categories && wide_)
             handleCategoryKeys(k);
         else
@@ -1285,6 +1416,8 @@ class App
         auto needCategory = [&] {
             flash("Select a category first (not All or Inbox)", true);
         };
+        if ((catSelId_ == kRooms || isRoomView(catSelId_)) && handleRoomKeys(k))
+            return;
 
         if (on("down"))
             moveCatSel(1);
@@ -1328,6 +1461,28 @@ class App
                 return needCategory();
             startInput(Mode::StyleCategory, cat->style.empty() ? "" : cat->style.describe());
         }
+    }
+
+    // The category keys on the Rooms rows: add, rename, delete and topic.
+    // Returns false for keys that work as usual there (moving, folding...).
+    bool handleRoomKeys(const Key &k)
+    {
+        auto on = [&](const char *action) { return keys_.is(k, action); };
+        const RoomItem *room = findRoom(roomOf(catSelId_));
+        auto needRoom = [&] { flash("Select a room first", true); };
+        if (on("cat_add"))
+            startInput(Mode::AddRoom, "");
+        else if (on("cat_rename"))
+            room ? startInput(Mode::RenameRoom, room->name) : needRoom();
+        else if (on("cat_style"))
+            room ? startInput(Mode::RoomTopic, room->topic) : needRoom();
+        else if (on("cat_delete"))
+            room ? void(mode_ = Mode::ConfirmDeleteRoom) : needRoom();
+        else if (on("cat_move") || on("cat_archive"))
+            flash("Rooms can't be moved or archived", true);
+        else
+            return false;
+        return true;
     }
 
     void toggleArchived(const CategoryItem &cat)
@@ -1407,6 +1562,37 @@ class App
             editId_ = cur->id;
             mode_ = Mode::ConfirmDeleteTodo;
         }
+        else if (on("todo_claim") || on("todo_take"))
+            claimOrRelease(*cur, on("todo_take"));
+    }
+
+    // Claims the todo for us, or releases our claim. Someone else's claim is
+    // only taken over with `take`.
+    void claimOrRelease(const TodoItem &t, bool take)
+    {
+        const std::string &me = api_.agent();
+        if (me.empty())
+            return flash("Say who you are first: todo --as NAME, or $TODO_AGENT", true);
+        const int64_t id = t.id;
+        if (t.claimedBy == me)
+        {
+            if (take)
+                return flash("#" + std::to_string(id) + " is already yours", false);
+            act([&] {
+                api_.release(id);
+                flash("Released #" + std::to_string(id), false);
+            });
+            return;
+        }
+        if (!t.claimedBy.empty() && !take)
+            return flash("Claimed by " + t.claimedBy + "; " + keys_.labels("todo_take", 1) +
+                             " takes it over",
+                         true);
+        const std::string from = t.claimedBy;
+        act([&] {
+            api_.claim(id, take);
+            flash("Claimed #" + std::to_string(id) + (from.empty() ? "" : " from " + from), false);
+        });
     }
 
     // In the Pruned view: restore or delete for good; nothing else applies.
@@ -1427,7 +1613,7 @@ class App
             mode_ = Mode::ConfirmDeleteTodo;
         }
         else if (on("todo_edit") || on("todo_move") || on("todo_priority") || on("todo_deadline") ||
-                 on("todo_prune") || on("todo_describe"))
+                 on("todo_prune") || on("todo_describe") || on("todo_claim") || on("todo_take"))
             flash("It's pruned: restore it first (" + keys_.labels("todo_restore", 1) + ")", true);
     }
 
@@ -1539,6 +1725,60 @@ class App
         if (!d)
             return false;
         detailsOffset_ = std::max(0, detailsOffset_ + d);  // drawDetails keeps it in range
+        if (d < 0)
+            logFollow_ = false;  // reading back in a room's log
+        return true;
+    }
+
+    // People to suggest for the "@name" being typed in a message: the
+    // room's members matching it, most recently seen first, not you. Empty
+    // unless the cursor is at the end of an "@..." word.
+    std::vector<std::string> mentionMatches() const
+    {
+        const std::string word = input_.wordBeforeCursor();
+        const RoomItem *room = findRoom(sayRoom_);
+        if (!room || word.empty() || word[0] != '@')
+            return {};
+        auto lower = [](std::string s) {
+            for (auto &c : s)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        const std::string prefix = lower(word.substr(1));
+        auto members = room->members;
+        std::stable_sort(members.begin(), members.end(),
+                         [](const auto &a, const auto &b) { return a.second > b.second; });
+        std::vector<std::string> out;
+        for (const auto &[name, seen] : members)
+            if (name != api_.agent() && lower(name).compare(0, prefix.size(), prefix) == 0)
+                out.push_back(name);
+        // Nothing left to complete once it's typed out in full.
+        if (out.size() == 1 && lower(out[0]) == prefix)
+            out.clear();
+        return out;
+    }
+
+    // While suggestions show: ↑/↓ pick one, tab or enter puts it in. Returns
+    // true if it used the key.
+    bool handleMention(const Key &k)
+    {
+        const auto matches = mentionMatches();
+        if (matches.empty())
+        {
+            mentionSel_ = 0;
+            return false;
+        }
+        const int n = static_cast<int>(matches.size());
+        mentionSel_ = std::clamp(mentionSel_, 0, n - 1);
+        if (k.type == Key::Down || k.type == Key::BackTab || k.type == Key::Up)
+            mentionSel_ = (mentionSel_ + (k.type == Key::Down ? 1 : -1) + n) % n;
+        else if (k.type == Key::Tab || k.type == Key::Enter)
+        {
+            input_.replaceWordBeforeCursor("@" + matches[mentionSel_] + " ");
+            mentionSel_ = 0;
+        }
+        else
+            return false;
         return true;
     }
 
@@ -1555,10 +1795,12 @@ class App
             return;
         }
         std::string text = trim(input_.text());
-        // An empty deadline or style clears it.
-        if (text.empty() && mode_ != Mode::SetDeadline && mode_ != Mode::StyleCategory)
+        // An empty deadline, style or topic clears it.
+        if (text.empty() && mode_ != Mode::SetDeadline && mode_ != Mode::StyleCategory &&
+            mode_ != Mode::RoomTopic)
         {
             flash(mode_ == Mode::AddTodo || mode_ == Mode::EditTodo ? "Title can't be empty"
+                  : mode_ == Mode::PostMessage                      ? "Nothing to post"
                                                                     : "Name can't be empty",
                   true);
             return;
@@ -1570,8 +1812,9 @@ class App
             case Mode::AddTodo:
             {
                 const int64_t cat = target();
+                const int64_t room = targetRoom();
                 ok = act([&] {
-                    selId_ = api_.add(text, cat).id;
+                    selId_ = api_.add(text, cat, 0, "", "", room).id;
                     // Make sure the new todo is visible and selected.
                     if (status_ == Status::Done || status_ == Status::Pruned)
                         status_ = Status::All;
@@ -1649,6 +1892,39 @@ class App
                 });
                 break;
             }
+            case Mode::AddRoom:
+            {
+                int64_t created = 0;
+                ok = act([&] {
+                    created = api_.addRoom(text, "").id;
+                    flash("Created room " + text, false);
+                });
+                if (ok)
+                    selectCategory(roomView(created));
+                break;
+            }
+            case Mode::RenameRoom:
+            case Mode::RoomTopic:
+            {
+                const int64_t room = roomOf(catSelId_);
+                const bool rename = mode_ == Mode::RenameRoom;
+                ok = act([&] {
+                    if (rename)
+                        api_.updateRoom(room, text, std::nullopt);
+                    else
+                        api_.updateRoom(room, std::nullopt, text);
+                    flash(rename ? "Renamed to " + text : text.empty() ? "Topic cleared" : "Topic saved",
+                          false);
+                });
+                break;
+            }
+            case Mode::PostMessage:
+            {
+                const int64_t room = sayRoom_;
+                ok = act([&] { api_.post(room, input_.text()); });
+                logFollow_ = true;
+                break;
+            }
             default: break;
         }
         if (ok)  // on failure keep the popup open so the text can be fixed
@@ -1704,6 +1980,16 @@ class App
                 api_.remove(id);
                 flash("Deleted #" + std::to_string(id), false);
             });
+        }
+        else if (mode_ == Mode::ConfirmDeleteRoom)
+        {
+            const int64_t room = roomOf(catSelId_);
+            const std::string name = roomName(room);
+            if (act([&] { api_.removeRoom(room); }))
+            {
+                flash("Deleted room " + name, false);
+                selectCategory(kRooms);
+            }
         }
         else if (mode_ == Mode::ConfirmDeleteCategory)
         {
@@ -1781,8 +2067,10 @@ class App
             const int left = !wide_ ? 0
                              : std::clamp(leftW_ > 0 ? leftW_ : std::clamp(W / 4, 24, 36), kMinLeft,
                                           std::max(kMinLeft, W - kMinMain));
+            // A room's log gets more room than a todo's details.
+            const int autoDetails = isRoomView(catSelId_) ? std::max(6, main * 2 / 5) : 6;
             const int details = !wide_ ? 0
-                                : std::clamp(detailsH_ > 0 ? detailsH_ : 6, kMinDetails,
+                                : std::clamp(detailsH_ > 0 ? detailsH_ : autoDetails, kMinDetails,
                                              std::max(kMinDetails, main - kMinTodos));
             lastW_ = W;
             lastMain_ = main;
@@ -1805,9 +2093,14 @@ class App
                 case Mode::AddCategory:
                 case Mode::RenameCategory:
                 case Mode::StyleCategory:
-                case Mode::SetDeadline: drawInputPopup(W, H, cx, cy); break;
+                case Mode::SetDeadline:
+                case Mode::AddRoom:
+                case Mode::RenameRoom:
+                case Mode::RoomTopic:
+                case Mode::PostMessage: drawInputPopup(W, H, cx, cy); break;
                 case Mode::ConfirmDeleteTodo:
                 case Mode::ConfirmDeleteCategory:
+                case Mode::ConfirmDeleteRoom:
                 case Mode::ConfirmClear: drawConfirmPopup(W, H); break;
                 case Mode::Pick: drawPickPopup(W, H); break;
                 case Mode::Help: drawHelpPopup(W, H); break;
@@ -1832,7 +2125,9 @@ class App
         panel(x, y, w, h, "Status", false);
         const int32_t state = online_ ? theme_.success : theme_.error;
         int e = c_.text(x + 2, y + 1, "● ", Style(state));
-        c_.text(e, y + 1, online_ ? "online" : "offline", Style(state, Default, Bold));
+        e = c_.text(e, y + 1, online_ ? "online" : "offline", Style(state, Default, Bold));
+        if (!api_.agent().empty())  // who we are in rooms
+            c_.text(e, y + 1, truncate(" as " + api_.agent(), x + w - 2 - e), muted(), x + w - 1);
         std::string host = api_.server();
         if (auto p = host.find("://"); p != std::string::npos)
             host = host.substr(p + 3);
@@ -1954,6 +2249,19 @@ class App
                         maxX);
                 right -= 2;
             }
+            // Who's working on it.
+            if (!t.claimedBy.empty())
+            {
+                const std::string who = "@" + truncate(t.claimedBy, 16);
+                right -= textWidth(who);
+                c_.text(right, row, who,
+                        sel      ? Style(theme_.selectionFg, bg, Bold)
+                        : t.done ? dim
+                        : t.claimedBy == api_.agent() ? Style(theme_.success, bg, Bold)
+                                                       : Style(theme_.accent, bg),
+                        maxX);
+                right -= 2;
+            }
             std::string tag;
             if (t.categoryId != 0 && t.categoryId != catSelId_)
                 tag = catSelId_ > 0 ? tree_.relativePath(t.categoryId, catSelId_)
@@ -2034,6 +2342,8 @@ class App
 
     void drawDetails(int x, int y, int w, int h)
     {
+        if (isRoomView(catSelId_))
+            return drawRoomLog(x, y, w, h);
         const bool active = focus_ == Focus::Details;
         const TodoItem *t = selected();
         const int inner = w - 4;
@@ -2092,12 +2402,123 @@ class App
             cx = c_.text(cx, y + 1, "due " + t->deadline + " (" + todo::dueLabel(t->deadline) + ")",
                          todo::overdue(*t) ? Style(theme_.error, Default, Bold) : Style(), maxX);
         }
+        if (t->roomId)
+        {
+            cx = c_.text(cx, y + 1, " · ", dim);
+            cx = c_.text(cx, y + 1, "room " + roomName(t->roomId), Style(theme_.accent), maxX);
+        }
+        if (!t->claimedBy.empty())
+        {
+            cx = c_.text(cx, y + 1, " · ", dim);
+            cx = c_.text(cx, y + 1, "@" + t->claimedBy,
+                         Style(t->claimedBy == api_.agent() ? theme_.success : theme_.accent, Default, Bold),
+                         maxX);
+        }
         c_.text(cx, y + 1, " · created " + formatTime(t->createdAt), dim, maxX);
 
         for (int i = 0; i < avail && detailsOffset_ + i < static_cast<int>(lines.size()); ++i)
         {
             const auto &[text, bold] = lines[detailsOffset_ + i];
             c_.text(x + 2, y + 2 + i, text, Style(Default, Default, bold ? Bold : 0), maxX);
+        }
+    }
+
+    // The room's topic and members, then its messages, newest at the bottom.
+    // It follows new messages unless scrolled up.
+    void drawRoomLog(int x, int y, int w, int h)
+    {
+        const bool active = focus_ == Focus::Details;
+        const RoomItem *room = findRoom(roomOf(catSelId_));
+        const int inner = w - 4;
+        const int maxX = x + w - 1;
+
+        struct Line
+        {
+            std::string time, author, text;  // time/author only on a message's first line
+            bool event, mine;
+        };
+        std::vector<Line> lines;
+        for (const auto &m : log_)
+        {
+            const std::string time = rooms::clock(m.createdAt);
+            const std::string who = m.author.empty() ? "server" : m.author;
+            // Events read as a sentence: "alice claimed #3 ...".
+            const std::string head = time + " " + who + (m.event ? " " : ": ");
+            const int indent = textWidth(time) + 1;
+            std::istringstream paras(m.text);
+            bool first = true;
+            for (std::string para; std::getline(paras, para);)
+            {
+                const int room = std::max(inner - (first ? textWidth(head) : indent), 8);
+                for (const auto &l : wrap(para, room))
+                {
+                    lines.push_back({first ? time : std::string(indent - 1, ' '), first ? who : "", l,
+                                     m.event, m.author == api_.agent()});
+                    first = false;
+                }
+            }
+        }
+        const int avail = std::max(h - 3, 0);
+        detailsRows_ = avail;
+        const int maxOffset = std::max(0, static_cast<int>(lines.size()) - avail);
+        if (logFor_ != logRoom_)
+            logFollow_ = true;
+        logFor_ = logRoom_;
+        if (logFollow_)
+            detailsOffset_ = maxOffset;
+        detailsOffset_ = std::clamp(detailsOffset_, 0, maxOffset);
+        logFollow_ = detailsOffset_ == maxOffset;  // scrolling back down resumes following
+
+        std::string footer = " " + keys_.labels("room_say", 1) + " post ";
+        if (detailsOffset_ < maxOffset)
+            footer = " " + std::to_string(maxOffset - detailsOffset_) + " lines below ·" + footer;
+        panel(x, y, w, h, panelTitle("focus_details", "Room " + (room ? room->name : "?")), active,
+              footer);
+        if (!room)
+            return;
+
+        // Topic, then who's around.
+        int cx = c_.text(x + 2, y + 1, room->topic.empty() ? "no topic" : room->topic,
+                         room->topic.empty() ? muted() : Style(Default, Default, Bold), maxX);
+        for (size_t i = 0; i < room->members.size(); ++i)
+        {
+            const auto &[name, seen] = room->members[i];
+            cx = c_.text(cx, y + 1, i ? ", " : "  · ", muted(), maxX);
+            cx = c_.text(cx, y + 1, name,
+                         Style(name == api_.agent() ? theme_.success : theme_.accent), maxX);
+        }
+        if (lines.empty())
+        {
+            c_.text(x + 2, y + 2, "No messages yet — press " + keys_.labels("room_say", 1) + " to post one",
+                    muted(), maxX);
+            return;
+        }
+        for (int i = 0; i < avail && detailsOffset_ + i < static_cast<int>(lines.size()); ++i)
+        {
+            const auto &l = lines[detailsOffset_ + i];
+            const int row = y + 2 + i;
+            int lx = c_.text(x + 2, row, l.time, muted(), maxX) + 1;
+            if (l.event)
+            {
+                if (!l.author.empty())
+                    lx = c_.text(lx, row, l.author + " ", muted(Default, Italic), maxX);
+                c_.text(lx, row, l.text, muted(Default, Italic), maxX);
+                continue;
+            }
+            if (!l.author.empty())
+            {
+                lx = c_.text(lx, row, l.author, Style(l.mine ? theme_.success : theme_.accent, Default, Bold),
+                             maxX);
+                lx = c_.text(lx, row, ": ", muted(), maxX);
+            }
+            // Mentions stand out: ours highlighted, others in the accent color.
+            for (const auto &[part, kind] : rooms::splitMentions(l.text, api_.agent()))
+                lx = c_.text(lx, row, part,
+                             kind == rooms::Mention::Me
+                                 ? Style(theme_.bg == Default ? 0 : theme_.bg, theme_.pending, Bold)
+                             : kind == rooms::Mention::Other ? Style(theme_.accent, Default, Bold)
+                                                             : Style(),
+                             maxX);
         }
     }
 
@@ -2138,7 +2559,17 @@ class App
             auto x = key(a), y = key(b);
             return x.empty() || y.empty() ? x + y : x + " " + y;
         };
-        if (focus_ == Focus::Categories)
+        if (focus_ == Focus::Categories && (catSelId_ == kRooms || isRoomView(catSelId_)))
+            keyHints(y, w,
+                     {{key("cat_add"), "new room"},
+                      {key("cat_rename"), "rename"},
+                      {key("cat_style"), "topic"},
+                      {key("cat_delete"), "delete"},
+                      {key("room_say"), "post"},
+                      {key("new_todo"), "new todo"},
+                      {key("help"), "help"},
+                      {key("quit"), "quit"}});
+        else if (focus_ == Focus::Categories)
             keyHints(y, w,
                      {{key("cat_add"), "add subcategory"},
                       {key("cat_rename"), "rename"},
@@ -2165,6 +2596,8 @@ class App
                      {{key("todo_add"), "add"},
                       {key("todo_edit"), "edit"},
                       {key("todo_toggle"), "toggle"},
+                      {key("todo_claim"), "claim"},
+                      {isRoomView(catSelId_) ? key("room_say") : "", "post"},
                       {key("todo_move"), "move"},
                       {key("todo_priority"), "priority"},
                       {key("todo_deadline"), "deadline"},
@@ -2196,7 +2629,15 @@ class App
         switch (mode_)
         {
             case Mode::AddTodo:
-                title = target() ? "New todo in " + tree_.path(target()) : "New todo";
+                title = target()       ? "New todo in " + tree_.path(target())
+                        : targetRoom() ? "New todo in room " + roomName(targetRoom())
+                                       : "New todo";
+                break;
+            case Mode::AddRoom: title = "New room"; break;
+            case Mode::RenameRoom: title = "Rename room " + roomName(roomOf(catSelId_)); break;
+            case Mode::RoomTopic: title = "Topic of " + roomName(roomOf(catSelId_)); break;
+            case Mode::PostMessage:
+                title = "Post to " + roomName(sayRoom_) + " as " + api_.agent();
                 break;
             case Mode::EditTodo: title = "Edit #" + std::to_string(editId_); break;
             case Mode::StyleCategory:
@@ -2212,11 +2653,36 @@ class App
             default: title = "Rename " + tree_.path(catSelId_); break;
         }
         auto [x, y] = popup(W, H, w, 3, title,
-                            mode_ == Mode::SetDeadline || mode_ == Mode::StyleCategory
+                            mode_ == Mode::SetDeadline || mode_ == Mode::StyleCategory ||
+                                    mode_ == Mode::RoomTopic
                                 ? " empty clears · enter save · esc cancel "
-                                                       : " enter save · esc cancel ");
+                            : mode_ == Mode::PostMessage ? " enter post · esc cancel "
+                                                         : " enter save · esc cancel ");
         cx = input_.draw(c_, x + 2, y + 1, w - 4, Style());
         cy = y + 1;
+        if (mode_ == Mode::PostMessage)
+            drawMentions(x, y + 3, w, H);
+    }
+
+    // The "@name" suggestions, in a box under the input.
+    void drawMentions(int x, int y, int w, int H)
+    {
+        const auto matches = mentionMatches();
+        const int shown = std::min<int>(matches.size(), std::max(0, H - 2 - y - 1));
+        if (shown <= 0)
+            return;
+        const int sel = std::clamp(mentionSel_, 0, static_cast<int>(matches.size()) - 1);
+        const int first = std::clamp(sel - shown + 1, 0, static_cast<int>(matches.size()) - shown);
+        c_.fill(x, y, w, shown + 2, Style());
+        panel(x, y, w, shown + 2, "", true, " ↑↓ pick · tab/enter insert ");
+        for (int i = 0; i < shown; ++i)
+        {
+            const bool on = first + i == sel;
+            const Style st = on ? Style(theme_.selectionFg, theme_.selectionBg, Bold) : Style();
+            if (on)
+                c_.fill(x + 1, y + 1 + i, w - 2, 1, st);
+            c_.text(x + 2, y + 1 + i, "@" + matches[first + i], st, x + w - 2);
+        }
     }
 
     void drawConfirmPopup(int W, int H)
@@ -2233,6 +2699,13 @@ class App
             lines.push_back("Their ids are freed; they stay under Pruned ( ] ).");
             if (n != std::count_if(todos_.begin(), todos_.end(), [](auto &t) { return t.done; }))
                 lines.push_back("Completed todos in archived categories are kept.");
+        }
+        else if (mode_ == Mode::ConfirmDeleteRoom)
+        {
+            title = "Delete room";
+            lines.push_back("Delete room “" + truncate(roomName(roomOf(catSelId_)), w - 20) + "”?");
+            lines.push_back("Its messages are deleted.");
+            lines.push_back("Its todos stay, outside any room.");
         }
         else if (mode_ == Mode::ConfirmDeleteCategory)
         {
@@ -2350,6 +2823,13 @@ class App
 
     std::vector<TodoItem> todos_;
     std::vector<TodoItem> pruned_;  // their ids are p1, p2..., apart from todos_'
+    std::vector<RoomItem> rooms_;
+    std::vector<MessageItem> log_;  // the viewed room's latest messages
+    int64_t logRoom_{0};            // whose messages log_ holds
+    int64_t logFor_{0};             // the room the log was last drawn for
+    bool logFollow_{true};          // keep the newest message in view
+    int64_t sayRoom_{0};            // where PostMessage posts
+    int mentionSel_{0};             // the highlighted "@name" suggestion
     CategoryTree tree_;
     bool online_{true};
     Clock::time_point lastLoad_{};

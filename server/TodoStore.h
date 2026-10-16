@@ -3,6 +3,8 @@
 #include <json/json.h>
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -24,6 +26,8 @@ struct Todo
     // Unix seconds when it was pruned; 0 for live todos. Pruned todos have
     // their own ids (shown as p1, p2...), so their old id is free again.
     int64_t prunedAt{0};
+    int64_t roomId{0};      // the room it's shared in; 0 for none
+    std::string claimedBy;  // the agent working on it; "" for nobody
 
     Json::Value toJson() const;
 };
@@ -44,10 +48,12 @@ struct TodoPatch
     std::optional<int> priority;
     std::optional<std::string> deadline;     // "" clears it
     std::optional<std::string> description;  // "" clears it
+    std::optional<int64_t> roomId;           // 0 takes it out of its room
 
     bool empty() const
     {
-        return !title && !done && !categoryId && !priority && !deadline && !description;
+        return !title && !done && !categoryId && !priority && !deadline && !description &&
+               !roomId;
     }
 };
 
@@ -80,6 +86,36 @@ struct Category
     Json::Value toJson() const;
 };
 
+// A place where agents (and people) coordinate: a message log plus the todos
+// shared in it, which they claim before working on them.
+struct Room
+{
+    int64_t id{0};
+    std::string name;
+    std::string topic;  // what the room is for; "" for none
+    int64_t createdAt{0};
+    // Agent name -> unix seconds it last posted, claimed or read here.
+    std::map<std::string, int64_t> members;
+
+    Json::Value toJson() const;
+};
+
+// Ids are global and only grow, so "messages after id N" works as a cursor.
+struct Message
+{
+    int64_t id{0};
+    int64_t roomId{0};
+    std::string author;  // "" for the server
+    std::string text;
+    int64_t createdAt{0};
+    // "message" is something someone said; "event" is written by the server
+    // when a room todo changes (added, claimed, done...), naming that todo.
+    std::string kind{"message"};
+    int64_t todoId{0};
+
+    Json::Value toJson() const;
+};
+
 // A request the store refuses; `status` is the HTTP status to report.
 struct StoreError : std::runtime_error
 {
@@ -99,10 +135,17 @@ class TodoStore
 
     // Without `includeArchived`, todos in archived categories are left out.
     std::vector<Todo> list(bool includeArchived) const;
-    // Takes the category, priority, deadline and description from `init`.
-    Todo add(const std::string &title, const Todo &init);
-    std::optional<Todo> update(int64_t id, const TodoPatch &patch);
-    bool remove(int64_t id);
+    // `actor` (an agent name, or "") is who made the change; changes to room
+    // todos are announced in the room under that name.
+
+    // Takes the category, room, priority, deadline and description from `init`.
+    Todo add(const std::string &title, const Todo &init, const std::string &actor = "");
+    std::optional<Todo> update(int64_t id, const TodoPatch &patch, const std::string &actor = "");
+    bool remove(int64_t id, const std::string &actor = "");
+    // Claiming is how agents split up work: 409 if someone else holds it,
+    // unless `force`. Releasing someone else's claim also needs `force`.
+    Todo claim(int64_t id, const std::string &agent, bool force);
+    Todo release(int64_t id, const std::string &agent, bool force);
     size_t clearDone();  // keeps todos in archived categories
 
     // Pruning moves a done todo to the pruned list, freeing its id: new todos
@@ -126,6 +169,30 @@ class TodoStore
     // Deletes a category; its todos and subcategories move to its parent.
     void removeCategory(int64_t id);
 
+    // ── Rooms ──
+    std::vector<Room> listRooms() const;
+    Room room(int64_t id) const;  // 404 if missing
+    // Finds a room by id ("3", "#3") or name (case-insensitive); 404 if none.
+    Room findRoom(const std::string &ref) const;
+    Room addRoom(const std::string &name, const std::string &topic);
+    Room updateRoom(int64_t id, const std::optional<std::string> &name,
+                    const std::optional<std::string> &topic);
+    // Deletes the room and its messages; its todos stay, outside any room.
+    void removeRoom(int64_t id);
+    // Drops `name` from the room's members (they rejoin if they show up again).
+    Room removeMember(int64_t id, const std::string &name);
+    Message post(int64_t roomId, const std::string &author, const std::string &text);
+    // Messages with ids above `since`, oldest first, at most `limit` (the
+    // newest ones if there are more). since 0 = from the start.
+    std::vector<Message> messages(int64_t roomId, int64_t since, size_t limit) const;
+    int64_t lastMessageId(int64_t roomId) const;
+    // Notes that `agent` looked at the room (kept in memory until the next save).
+    void touch(int64_t roomId, const std::string &agent);
+
+    // Called with the room id after each new message, while the store is
+    // locked: it must not call back into the store.
+    void setMessageListener(std::function<void(int64_t)> fn);
+
   private:
     explicit TodoStore(std::string path);
     void load();
@@ -137,11 +204,24 @@ class TodoStore
     bool inArchive(int64_t id) const;
     void checkCategoryExists(int64_t id);
     void checkSiblingName(const std::string &name, int64_t parentId, int64_t selfId);
+    Room *findRoomById(int64_t id);
+    void checkRoomExists(int64_t id);
+    void checkRoomName(const std::string &name, int64_t selfId);
+    // Appends a message (and marks `author` as a member); callers save.
+    const Message &append(int64_t roomId, const std::string &author, const std::string &text,
+                          const std::string &kind, int64_t todoId);
+    // Announces a change to a room todo in its room, if it has one.
+    void event(const Todo &t, const std::string &actor, const std::string &what);
 
     mutable std::mutex mu_;
     std::string path_;
     std::vector<Todo> todos_;
     std::vector<Category> categories_;
     std::vector<Todo> pruned_;
+    std::vector<Room> rooms_;
+    std::vector<Message> messages_;
     int64_t nextCategoryId_{1};
+    int64_t nextRoomId_{1};
+    int64_t nextMessageId_{1};
+    std::function<void(int64_t)> listener_;
 };

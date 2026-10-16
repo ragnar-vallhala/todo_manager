@@ -1,3 +1,4 @@
+#include "RoomHub.h"
 #include "TodoStore.h"
 
 #include <drogon/drogon.h>
@@ -50,6 +51,7 @@ int main(int argc, char *argv[])
     try
     {
         TodoStore::init(dataFile);
+        TodoStore::get().setMessageListener([](int64_t roomId) { RoomHub::get().notify(roomId); });
     }
     catch (const std::exception &e)
     {
@@ -64,6 +66,9 @@ int main(int argc, char *argv[])
         .setLogLevel(trantor::Logger::kWarn)
         .addListener(host, port)
         .setThreadNum(2)
+        // Room reads may wait up to 300 s for news; the default (60 s) would
+        // drop them first.
+        .setIdleConnectionTimeout(330)
         .setDocumentRoot(webDir)
         .run();
 }

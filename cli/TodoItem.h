@@ -21,6 +21,8 @@ struct TodoItem
     std::string deadline;   // "YYYY-MM-DD", or "" for none
     std::string description;  // optional notes, may span lines
     int64_t prunedAt{0};    // set on pruned todos, whose ids are their own (p1, p2...)
+    int64_t roomId{0};      // the room it's shared in; 0 for none
+    std::string claimedBy;  // the agent working on it; "" for nobody
 
     bool pruned() const { return prunedAt != 0; }
     std::string idLabel() const { return (pruned() ? "p" : "") + std::to_string(id); }
@@ -214,5 +216,7 @@ inline TodoItem TodoItem::fromJson(const Json::Value &v)
     t.deadline = v["deadline"].isString() ? v["deadline"].asString() : "";
     t.description = v["description"].isString() ? v["description"].asString() : "";
     t.prunedAt = v["prunedAt"].asInt64();
+    t.roomId = v["roomId"].isNull() ? 0 : v["roomId"].asInt64();
+    t.claimedBy = v["claimedBy"].isString() ? v["claimedBy"].asString() : "";
     return t;
 }

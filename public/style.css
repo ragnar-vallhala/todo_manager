@@ -28,6 +28,10 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
+/* The page itself never scrolls: the sidebar, the todo column, the room's
+   log and pop-up lists each scroll on their own, and scrolling past the end
+   of one doesn't carry over to what's behind it. */
+html, body { height: 100%; overflow: hidden; }
 html { -webkit-text-size-adjust: 100%; }
 
 body {
@@ -89,19 +93,31 @@ svg {
 
 .layout {
   display: grid;
-  grid-template-columns: 190px minmax(0, 580px);
-  gap: 64px;
+  grid-template-columns: 220px minmax(0, 760px);
+  grid-template-rows: 100%;
+  gap: 72px;
   justify-content: center;
-  padding: 72px 24px 96px;
+  height: 100vh;
+  height: 100dvh;
+  padding: 0 32px;
+}
+
+#sidebar, main, .room-log, .pick-list, .mentions {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
 }
 
 #sidebar {
-  position: sticky;
-  top: 72px;
-  align-self: start;
-  max-height: calc(100vh - 96px);
   overflow-y: auto;
-  padding-top: 2px;
+  padding: 66px 4px 32px 0;
+}
+
+main {
+  overflow-y: auto;
+  /* room for the scrollbar beside the content, not over it */
+  margin-right: -14px;
+  padding: 64px 14px 96px 0;
 }
 
 .nav {
@@ -137,21 +153,43 @@ svg {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 3px 6px;
+  padding: 4px 8px;
   border-radius: 6px;
   font-size: 0.9375rem;
   color: var(--muted);
   transition: color 0.12s, background 0.12s;
 }
 .nav-item:hover { color: var(--text); background: var(--hover); }
-.nav-item[aria-current="page"] { color: var(--text); font-weight: 600; }
+.nav-item[aria-current="page"] { color: var(--text); font-weight: 600; background: var(--hover); }
 .nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nav-count { font-weight: 400; color: var(--muted); font-size: 0.8125rem; padding-top: 1px; }
+.nav-count { font-weight: 400; color: var(--muted); font-size: 0.75rem; padding-top: 2px; opacity: 0.8; }
 
 #nav-archive:not(:empty) { margin-top: 14px; }
 .nav-row.archived .nav-name { opacity: 0.7; }
 
 #new-category { margin: 14px 0 0 22px; }
+#nav-rooms:not(:empty) { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--faint); }
+#new-room { display: block; margin: 6px 0 0 22px; }
+.nav-heading {
+  padding: 0 8px 6px 24px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+/* A room with messages you haven't seen */
+.nav-item.unread .nav-name { color: var(--text); font-weight: 600; }
+.nav-item.unread .nav-name::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 0 2px 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
 #theme-btn { display: block; margin: 6px 0 0 22px; }
 
 #nav-toggle { display: none; }
@@ -215,12 +253,12 @@ svg {
 
 /* ── The add field is the page's headline ── */
 
-#add-form { margin: 14px 0 32px; }
+#add-form { margin: 18px 0 28px; }
 
 #new-title {
   width: 100%;
   padding: 6px 0 12px;
-  font: 500 1.75rem/1.25 var(--font);
+  font: 500 1.5rem/1.3 var(--font);
   letter-spacing: -0.015em;
   color: var(--text);
   background: none;
@@ -235,12 +273,14 @@ svg {
 
 /* ── Groups and lists ── */
 
-.group + .group { margin-top: 26px; }
+.group + .group { margin-top: 30px; }
 
 .group-title {
-  margin: 0 0 4px;
+  margin: 0 0 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--faint);
   font-size: 0.8125rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 .group-title button { color: var(--muted); }
 .group-title button:hover { color: var(--text); }
@@ -254,9 +294,15 @@ svg {
 .item {
   display: flex;
   align-items: flex-start;
-  gap: 14px;
-  padding: 9px 0;
+  gap: 12px;
+  margin: 0 -10px;
+  padding: 10px 10px;
+  border-radius: 8px;
+  transition: background 0.12s;
 }
+.item:hover { background: var(--hover); }
+.list > .item + .item:not(.cat-block) { box-shadow: 0 -1px 0 color-mix(in srgb, var(--faint) 55%, transparent); }
+.list > .item:hover + .item, .list > .item + .item:hover { box-shadow: none; }
 .item.new { animation: appear 0.18s ease-out; }
 .item.dragging { opacity: 0.4; }
 
@@ -288,19 +334,36 @@ svg {
   flex: 1;
   min-width: 0;
 }
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
 .title {
-  display: block;
-  font-size: 1.0625rem;
-  overflow-wrap: anywhere;
+  flex: 1;
+  min-width: 0;
+  font-size: 1rem;
+  line-height: 1.45;
+  overflow-wrap: break-word;
   cursor: text;
 }
+
+/* Under the title: due date, category, room, claim */
+.item-meta {
+  display: none;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+.item-meta:has(> :not(:empty)) { display: flex; }
 .title:focus-visible { outline-offset: 2px; }
 
 .tag {
-  flex-shrink: 0;
-  max-width: 35%;
-  padding-top: 3px;
-  font-size: 0.8125rem;
+  min-width: 0;
+  max-width: 100%;
   color: var(--category, var(--muted));
   overflow: hidden;
   text-overflow: ellipsis;
@@ -310,7 +373,7 @@ svg {
 
 /* A todo's description: a few lines under the title; click to see it all. */
 .desc {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   font-size: 0.875rem;
   line-height: 1.45;
   color: var(--muted);
@@ -328,9 +391,9 @@ svg {
 /* Priority marks before the title: !!! high, !! medium, ! low */
 .prio {
   flex-shrink: 0;
-  margin-right: -8px;
-  padding-top: 1px;
-  font-weight: 600;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
   color: var(--muted);
 }
 .prio:empty { display: none; }
@@ -338,17 +401,14 @@ svg {
 .prio[data-p="medium"] { color: var(--warn); }
 
 .due {
-  flex-shrink: 0;
-  padding-top: 3px;
-  font-size: 0.8125rem;
   color: var(--muted);
   white-space: nowrap;
 }
 .due:empty { display: none; }
 .due.today { color: var(--warn); font-weight: 500; }
 .due.overdue { color: var(--danger); font-weight: 500; }
-.item .check[aria-checked="true"] ~ .prio,
-.item .check[aria-checked="true"] ~ .due { color: var(--muted); font-weight: 400; }
+.item .check[aria-checked="true"] ~ .body .prio,
+.item .check[aria-checked="true"] ~ .body .due { color: var(--muted); font-weight: 400; }
 
 .edit {
   flex: 1;
@@ -356,7 +416,7 @@ svg {
   margin: -1px 0;
   padding: 0 0 2px;
   font: inherit;
-  font-size: 1.0625rem;
+  font-size: 1rem;
   color: inherit;
   background: none;
   border: 0;
@@ -364,8 +424,12 @@ svg {
   outline: none;
 }
 
+.actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
 .item .icon {
-  margin-top: 1px;
   opacity: 0;
   transition: opacity 0.12s, color 0.12s;
 }
@@ -489,7 +553,7 @@ dialog .dialog-error { min-height: 1.25rem; margin: 0 0 12px; color: var(--dange
 /* Category styles (see `todo cat style`): a label with a background, or a
    whole row / heading filled with it (kept aligned with unstyled ones). */
 .cat-chip { padding: 0 6px; border-radius: 4px; }
-.item.cat-block { margin: 3px -10px; padding: 9px 10px; border-radius: 8px; }
+.item.cat-block { margin: 4px -10px; }
 .group-title.cat-block { margin: 0 -10px 4px; padding: 4px 10px; border-radius: 6px; }
 .nav-item.cat-block:hover { filter: brightness(1.08); }
 
@@ -556,6 +620,166 @@ dialog textarea:focus { border-color: var(--text); }
 dialog .date-row input { flex: 1; width: auto; margin: 0; color-scheme: inherit; }
 .date-row button { font-size: 0.875rem; }
 
+/* ── Rooms: claims on todos, the room's topic, members and message log ── */
+
+.room-tag, .claimed {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-tag:empty, .claimed:empty { display: none; }
+.claimed::before { content: "@"; opacity: 0.7; }
+.claimed.mine { color: var(--accent); font-weight: 500; }
+.item .claim.held:hover { color: var(--danger); }
+
+.room-info { margin: 14px 0 0; font-size: 0.875rem; }
+.room-topic { margin: 0 0 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.room-topic.none { color: var(--muted); }
+.room-members { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; color: var(--text); font-size: 0.8125rem; }
+.member {
+  padding: 2px 9px;
+  border: 1px solid var(--faint);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.member .seen { color: var(--muted); }
+.member .forget {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin: 0 -4px 0 4px;
+  vertical-align: -3px;
+  border-radius: 50%;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.member .forget svg { width: 10px; height: 10px; stroke-width: 2; }
+.member:hover .forget, .member .forget:focus-visible { opacity: 1; }
+.member .forget:hover { color: var(--danger); background: var(--hover); }
+@media (hover: none) { .member .forget { opacity: 0.7; } }
+.member.you { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.member.you:hover { background: var(--hover); }
+#room-info:not([hidden]) ~ #add-form { margin-top: 24px; }
+
+/* Narrow: the conversation sits right under the room's info, above its todos.
+   Wide: it's a panel beside the todos that stays in view while they scroll. */
+.room-log-section { margin-top: 24px; }
+
+@media (min-width: 1280px) {
+  .layout:has(#room-log-section:not([hidden])) { grid-template-columns: 220px minmax(0, 1220px); }
+  main:has(> #room-log-section:not([hidden])) {
+    padding-bottom: 32px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+    grid-template-rows: repeat(9, auto) 1fr;
+    column-gap: 48px;
+    align-items: start;
+  }
+  main > * { grid-column: 1; }
+  main > .room-log-section {
+    grid-column: 2;
+    grid-row: 1 / -1;
+    position: sticky;
+    top: 0;
+    height: calc(100dvh - 96px);
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .room-log-section .room-log { flex: 1; min-height: 0; max-height: none; }
+  .room-log-section #room-log-empty { flex: 1; }
+}
+.log-title { margin: 0 0 10px; font-size: 0.8125rem; font-weight: 500; color: var(--muted); }
+.room-log {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 6px 14px;
+  max-height: 42vh;
+  overflow-y: auto;
+  background: var(--raised);
+  border: 1px solid var(--faint);
+  border-radius: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+}
+.room-log:empty { display: none; }
+.msg { padding: 8px 0; }
+.msg:not(.event) + .msg:not(.event) { border-top: 1px solid color-mix(in srgb, var(--faint) 55%, transparent); }
+.msg-head { display: flex; align-items: baseline; gap: 8px; }
+.msg-author { font-weight: 600; font-size: 0.9375rem; overflow-wrap: anywhere; }
+.msg-author[style*="--hue"] { color: color-mix(in oklab, hsl(var(--hue) 75% 55%) 70%, var(--text)); }
+.msg-author.mine { color: var(--accent); }
+/* @name and #123 inside messages */
+.mention {
+  color: color-mix(in oklab, hsl(var(--hue) 75% 55%) 70%, var(--text));
+  font-weight: 500;
+}
+.mention.me {
+  padding: 0 3px;
+  border-radius: 4px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.ref {
+  color: var(--warn);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.msg-time { margin-left: auto; padding-left: 8px; font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+.msg-text { margin: 2px 0 0; font-size: 0.9375rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Server-written events (claimed, finished...): one quiet line */
+.msg.event {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  padding: 2px 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.msg.event .msg-author { font-size: inherit; font-weight: 500; margin-right: 0.3em; }
+#room-log-empty { margin-bottom: 12px; }
+#room-text {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  resize: vertical;
+  outline: none;
+}
+#room-text:focus { border-color: var(--text); }
+#room-post { position: relative; }
+/* "@name" suggestions, opening upwards from the message box. */
+.mentions {
+  top: auto;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: auto;
+  margin: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.mentions li {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.mentions li[aria-selected="true"] { background: var(--hover); }
+.mentions .seen { color: var(--muted); font-size: 0.8125rem; }
+
 /* ── Errors ── */
 
 .error {
@@ -567,17 +791,22 @@ dialog .date-row input { flex: 1; width: auto; margin: 0; color-scheme: inherit;
 /* ── Narrow screens: the tree folds away behind the menu button ── */
 
 @media (max-width: 860px) {
+  /* One column: the sidebar folds above the todos and both scroll together. */
   .layout {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    align-content: start;
     gap: 0;
     padding: 40px 18px 72px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
+  main { overflow: visible; margin-right: 0; padding: 0; }
   #sidebar {
     display: none;
-    position: static;
-    max-height: none;
+    overflow: visible;
     margin-bottom: 28px;
-    padding-bottom: 20px;
+    padding: 0 0 20px;
     border-bottom: 1px solid var(--faint);
   }
   #sidebar.open { display: block; }

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Categories.h"
+#include "Rooms.h"
 #include "TodoItem.h"
 
 #include <drogon/HttpClient.h>
@@ -24,8 +25,9 @@ struct ApiError : std::runtime_error
 class Api
 {
   public:
-    explicit Api(std::string server, double timeoutSec = 5.0)
-        : server_(std::move(server)), timeout_(timeoutSec)
+    // `agent` is who we are in rooms, sent with every request (X-Todo-Agent).
+    explicit Api(std::string server, double timeoutSec = 5.0, std::string agent = "")
+        : server_(std::move(server)), timeout_(timeoutSec), agent_(std::move(agent))
     {
         loopThread_.run();
         client_ = drogon::HttpClient::newHttpClient(server_, loopThread_.getLoop());
@@ -33,6 +35,7 @@ class Api
     ~Api() { client_.reset(); }  // release client before its loop stops
 
     const std::string &server() const { return server_; }
+    const std::string &agent() const { return agent_; }
 
     // With `archived`, also todos in archived categories.
     std::vector<TodoItem> list(const std::string &status = "all", bool archived = false)
@@ -45,13 +48,16 @@ class Api
         return out;
     }
 
-    // `priority` 0, `deadline` "" and `description` "" mean none.
+    // `priority` 0, `deadline` "", `description` "" and `roomId` 0 mean none.
     TodoItem add(const std::string &title, int64_t categoryId = 0, int priority = 0,
-                 const std::string &deadline = "", const std::string &description = "")
+                 const std::string &deadline = "", const std::string &description = "",
+                 int64_t roomId = 0)
     {
         Json::Value body;
         body["title"] = title;
         body["categoryId"] = ref(categoryId);
+        if (roomId)
+            body["roomId"] = ref(roomId);
         if (priority)
             body["priority"] = todo::priorityName(priority);
         if (!deadline.empty())
@@ -100,6 +106,30 @@ class Api
         if (deadline)
             body["deadline"] = deadline->empty() ? Json::Value() : Json::Value(*deadline);
         return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
+    }
+
+    // 0 takes it out of its room.
+    TodoItem setRoom(int64_t id, int64_t roomId)
+    {
+        Json::Value body;
+        body["roomId"] = ref(roomId);
+        return TodoItem::fromJson(send(drogon::Patch, path(id), &body));
+    }
+
+    // Claims are how agents split up work. Claiming one someone else holds,
+    // or releasing their claim, fails unless `force`.
+    TodoItem claim(int64_t id, bool force = false)
+    {
+        Json::Value body;
+        body["force"] = force;
+        return TodoItem::fromJson(send(drogon::Post, path(id) + "/claim", &body));
+    }
+
+    TodoItem release(int64_t id, bool force = false)
+    {
+        Json::Value body;
+        body["force"] = force;
+        return TodoItem::fromJson(send(drogon::Post, path(id) + "/release", &body));
     }
 
     void remove(int64_t id) { send(drogon::Delete, path(id)); }
@@ -184,7 +214,73 @@ class Api
 
     void removeCategory(int64_t id) { send(drogon::Delete, catPath(id)); }
 
+    // ── rooms ──
+
+    std::vector<RoomItem> rooms()
+    {
+        std::vector<RoomItem> out;
+        for (const auto &v : send(drogon::Get, "/api/rooms"))
+            out.push_back(RoomItem::fromJson(v));
+        return out;
+    }
+
+    RoomItem addRoom(const std::string &name, const std::string &topic)
+    {
+        Json::Value body;
+        body["name"] = name;
+        if (!topic.empty())
+            body["topic"] = topic;
+        return RoomItem::fromJson(send(drogon::Post, "/api/rooms", &body));
+    }
+
+    // Changes whichever is given; a topic of "" clears it.
+    RoomItem updateRoom(int64_t id, const std::optional<std::string> &name,
+                        const std::optional<std::string> &topic)
+    {
+        Json::Value body;
+        if (name)
+            body["name"] = *name;
+        if (topic)
+            body["topic"] = topic->empty() ? Json::Value() : Json::Value(*topic);
+        return RoomItem::fromJson(send(drogon::Patch, roomPath(id), &body));
+    }
+
+    // Deletes its messages too; its todos stay, outside any room.
+    void removeRoom(int64_t id) { send(drogon::Delete, roomPath(id)); }
+
+    // Drops `name` from the room's members; they rejoin if they come back.
+    RoomItem removeMember(int64_t id, const std::string &name)
+    {
+        return RoomItem::fromJson(
+            send(drogon::Delete, roomPath(id) + "/members", nullptr, 0, {{"name", name}}));
+    }
+
+    // Messages after `since` (the newest `limit` of them). With `wait`
+    // seconds, the server holds the request until there is one, or answers
+    // with none when the time is up.
+    std::vector<MessageItem> messages(int64_t roomId, int64_t since, size_t limit = 100,
+                                      double wait = 0)
+    {
+        std::string q = roomPath(roomId) + "/messages?since=" + std::to_string(since) +
+                        "&limit=" + std::to_string(limit);
+        if (wait > 0)
+            q += "&wait=" + std::to_string(static_cast<int>(wait));
+        std::vector<MessageItem> out;
+        for (const auto &v : send(drogon::Get, q, nullptr, wait > 0 ? wait + 15 : 0))
+            out.push_back(MessageItem::fromJson(v));
+        return out;
+    }
+
+    MessageItem post(int64_t roomId, const std::string &text)
+    {
+        Json::Value body;
+        body["text"] = text;
+        return MessageItem::fromJson(send(drogon::Post, roomPath(roomId) + "/messages", &body));
+    }
+
   private:
+    static std::string roomPath(int64_t id) { return "/api/rooms/" + std::to_string(id); }
+
     static Json::Value ref(int64_t id)
     {
         return id ? Json::Value(static_cast<Json::Int64>(id)) : Json::Value();
@@ -201,17 +297,24 @@ class Api
     }
 
     // Returns the JSON body (null for empty responses); throws ApiError.
+    // `timeout` 0 uses the usual one; `params` go in the query string, encoded.
     Json::Value send(drogon::HttpMethod method,
                      const std::string &path,
-                     const Json::Value *body = nullptr)
+                     const Json::Value *body = nullptr,
+                     double timeout = 0,
+                     const std::vector<std::pair<std::string, std::string>> &params = {})
     {
         using namespace drogon;
         auto req = body ? HttpRequest::newHttpJsonRequest(*body)
                         : HttpRequest::newHttpRequest();
         req->setMethod(method);
         req->setPath(path);
+        for (const auto &[k, v] : params)
+            req->setParameter(k, v);
+        if (!agent_.empty())
+            req->addHeader("X-Todo-Agent", agent_);
 
-        auto [result, resp] = client_->sendRequest(req, timeout_);
+        auto [result, resp] = client_->sendRequest(req, timeout > 0 ? timeout : timeout_);
         if (result != ReqResult::Ok || !resp)
             throw ApiError("cannot reach server at " + server_ + " (" +
                                to_string(result) + ")",
@@ -228,6 +331,7 @@ class Api
 
     std::string server_;
     double timeout_;
+    std::string agent_;
     trantor::EventLoopThread loopThread_;
     drogon::HttpClientPtr client_;
 };

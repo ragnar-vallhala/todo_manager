@@ -7,9 +7,11 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -18,6 +20,9 @@
 namespace
 {
 bool gColor = isatty(STDOUT_FILENO);
+// Room names by id, for showing where todos are shared (see loadRoomNames).
+std::map<int64_t, std::string> gRoomNames;
+std::string gAgent;  // who we are in rooms
 
 std::string c(const char *code, const std::string &s)
 {
@@ -78,22 +83,24 @@ std::string catName(const CategoryTree &tree, int64_t id, const std::string &tex
 void usage()
 {
     std::cout <<
-R"(Usage: todo [-s URL] [command] [args]
+R"(Usage: todo [-s URL] [--as NAME] [command] [args]
 
 With no command, opens the interactive UI (press ? inside for keys).
 
 Todos:
   ui                                  open the interactive UI
-  list, ls [all|pending|done|pruned] [-c CAT]
+  list, ls [all|pending|done|pruned] [-c CAT] [-r ROOM]
                                       show todos, grouped by category
                                       (archived ones only with -c ARCHIVED_CAT)
-  add [-c CAT] [-p PRI] [-d DUE] [-m TEXT] <title...>
-                                      add a todo (to category CAT), -m with
-                                      a description
+  add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] <title...>
+                                      add a todo (to category CAT, shared in
+                                      ROOM), -m with a description
   done <id...>                        mark todo(s) done
   undo <id...>                        mark todo(s) not done
   edit <id> <title...>                rename a todo
-  set <id...> [-p PRI] [-d DUE]       set or change priority / deadline
+  set <id...> [-p PRI] [-d DUE] [-r ROOM]
+                                      set or change priority / deadline /
+                                      room (none takes it out of its room)
   desc <id> [TEXT...|-|none]          show a todo's description, or set it
                                       (- reads it from stdin, none clears it)
   mv <id...> <CAT>                    move todo(s) to CAT ("/" = no category)
@@ -104,6 +111,9 @@ Todos:
   clear                               same as prune with no ids
   restore <pN...>                     bring pruned todo(s) back, as done
   purge                               delete all pruned todos for good
+  claim <id...> [--force]             claim todo(s): you're working on them
+                                      (--force takes over someone else's)
+  release <id...> [--force]           give up your claim (--force: anyone's)
 
   PRI is high, medium, low (or h/m/l, 3/2/1), or none to clear it.
   DUE is a date like 2026-10-31, today, tomorrow, +N (days), a weekday
@@ -127,6 +137,30 @@ Categories (CAT is a path like work/robotics; case doesn't matter):
                                       no-bold etc., fg=none, or none to reset.
                                       COLOR is #rrggbb or red, orange, yellow,
                                       green, teal, blue, purple, pink, brown, gray
+
+Rooms (where agents and people coordinate; ROOM is a name or id):
+  room [ls]                           list rooms
+  room add <NAME> [TOPIC...]          create a room
+  room topic <ROOM> <TEXT...|none>    set what the room is for
+  room rename <ROOM> <NAME>           rename a room
+  room rm <ROOM>                      delete a room and its messages (its
+                                      todos stay, outside any room)
+  room show <ROOM> [-n N]             topic, members, todos, last N messages
+  room forget <ROOM> <NAME...>        remove members (e.g. old agents) so they
+                                      stop being suggested; anyone who posts
+                                      or reads the room again rejoins
+  room say <ROOM> <TEXT...|->         post a message (- reads stdin)
+  room read <ROOM> [--since ID] [-n N]
+                                      messages after ID, else the last N (20)
+  room wait <ROOM> [--since ID] [-t SECONDS]
+                                      wait for new messages (after ID, else
+                                      after the newest) and print them; exits
+                                      1 if none came within SECONDS (60)
+
+  Messages print as [#ID] time author: text; pass the last ID as --since to
+  read on from there. Changes to a room's todos show up as events.
+
+Who you are in rooms, first match wins: --as NAME, $TODO_AGENT, $USER.
 
 Server URL, first match wins: -s/--server URL, $TODO_SERVER, the first line
 of ~/.config/todo/server, else http://127.0.0.1:27183
@@ -198,6 +232,13 @@ int64_t parseId(const std::string &s)
     throw UsageError("invalid id '" + s + "'");
 }
 
+// A message id to read on from: "12", "#12", or 0 for the start.
+int64_t parseCursor(const std::string &s)
+{
+    const std::string digits = !s.empty() && s[0] == '#' ? s.substr(1) : s;
+    return digits == "0" ? 0 : parseId(digits);
+}
+
 // A pruned todo's id: "p3" (or just "3").
 int64_t parsePrunedId(const std::string &s)
 {
@@ -239,7 +280,8 @@ std::pair<std::optional<int>, std::optional<std::string>> takeExtras(std::vector
 
 // `look` is catSgr() of the todo's category: the line is drawn in it, and a
 // background fills the line.
-void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0, const std::string &look = "")
+void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0, const std::string &look = "",
+               bool showRoom = true)
 {
     auto id = t.idLabel();
     if (id.size() < idWidth)
@@ -264,7 +306,67 @@ void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0, const std:
     if (!t.deadline.empty())
         std::cout << "  " << part(t.done ? "2" : todo::overdue(t) ? "1;31" : todo::dueToday(t) ? "33" : "2",
                                   "due " + todo::dueLabel(t.deadline));
+    if (!t.claimedBy.empty())
+        std::cout << "  " << part(t.done ? "2" : t.claimedBy == gAgent ? "1;32" : "35", "@" + t.claimedBy);
+    if (t.roomId && showRoom)
+    {
+        auto it = gRoomNames.find(t.roomId);
+        std::cout << "  " << part("2", "room:" + (it != gRoomNames.end() ? it->second
+                                                                     : std::to_string(t.roomId)));
+    }
     std::cout << (gColor && !look.empty() ? "\033[K\033[0m" : "") << "\n";
+}
+
+// Fills gRoomNames; servers without rooms just have none.
+void loadRoomNames(Api &api)
+{
+    try
+    {
+        for (const auto &r : api.rooms())
+            gRoomNames[r.id] = r.name;
+    }
+    catch (const ApiError &e)
+    {
+        if (e.offline)
+            throw;
+    }
+}
+
+// A room by name (case-insensitive) or id ("3", "#3").
+RoomItem resolveRoom(Api &api, const std::string &ref)
+{
+    const std::string digits = !ref.empty() && ref[0] == '#' ? ref.substr(1) : ref;
+    const bool isId = !digits.empty() && digits.find_first_not_of("0123456789") == std::string::npos;
+    for (const auto &r : api.rooms())
+        if (isId ? std::to_string(r.id) == digits : CategoryTree::lower(r.name) == CategoryTree::lower(ref))
+            return r;
+    throw UsageError("no room \"" + ref + "\" (see `todo room`)");
+}
+
+// [#12] 14:03 alice: text  (events: [#13] 14:05 alice claimed #3 ...)
+void printMessage(const MessageItem &m, int indent = 0)
+{
+    std::cout << std::string(indent, ' ') << c("2", "[#" + std::to_string(m.id) + "] " + rooms::clock(m.createdAt)) << " ";
+    const std::string who = m.author.empty() ? "server" : m.author;
+    if (m.event)
+    {
+        std::cout << c("2;3", who + " " + m.text) << "\n";
+        return;
+    }
+    std::cout << c(m.author == gAgent ? "1;32" : "1;35", who) << ": ";
+    // Later lines line up under the first.
+    std::istringstream lines(m.text);
+    bool first = true;
+    for (std::string line; std::getline(lines, line); first = false)
+    {
+        std::cout << (first ? "" : std::string(indent + 4, ' '));
+        // Mentions stand out; ones of us most.
+        for (const auto &[part, kind] : rooms::splitMentions(line, gAgent))
+            std::cout << (kind == rooms::Mention::Me      ? c("1;30;43", part)
+                          : kind == rooms::Mention::Other ? c("1;36", part)
+                                                          : part);
+        std::cout << "\n";
+    }
 }
 
 // ── todos ──
@@ -272,6 +374,7 @@ void printTodo(const TodoItem &t, int indent = 0, size_t idWidth = 0, const std:
 int cmdList(Api &api, std::vector<std::string> args)
 {
     auto catPath = takeOpt(args, "-c", "--category");
+    auto roomRef = takeOpt(args, "-r", "--room");
     const std::string status = args.size() > 1 ? args[1] : "all";
     if (status != "all" && status != "pending" && status != "done" && status != "pruned")
         throw UsageError("status must be all, pending, done or pruned");
@@ -280,10 +383,11 @@ int cmdList(Api &api, std::vector<std::string> args)
     const int64_t root = catPath ? resolveCategory(tree, *catPath) : 0;
     // Archived todos only show up when looking inside an archived category.
     const bool archived = tree.inArchive(root);
+    const int64_t roomId = roomRef ? resolveRoom(api, *roomRef).id : 0;
     std::vector<TodoItem> todos;
     for (auto &t : status == "pruned" ? api.listPruned() : api.list(status, true))
         if ((!catPath || tree.isWithin(t.categoryId, root) || (root == 0 && t.categoryId == 0)) &&
-            (archived || !tree.inArchive(t.categoryId)))
+            (archived || !tree.inArchive(t.categoryId)) && (!roomId || t.roomId == roomId))
             todos.push_back(t);
 
     if (todos.empty())
@@ -357,10 +461,12 @@ int cmdList(Api &api, std::vector<std::string> args)
 int cmdAdd(Api &api, std::vector<std::string> args)
 {
     auto catPath = takeOpt(args, "-c", "--category");
+    auto roomRef = takeOpt(args, "-r", "--room");
     auto [priority, deadline] = takeExtras(args);
     auto description = takeOpt(args, "-m", "--desc");
     if (args.size() < 2)
-        throw UsageError("usage: todo add [-c CAT] [-p PRI] [-d DUE] [-m TEXT] <title...>");
+        throw UsageError("usage: todo add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] <title...>");
+    const int64_t roomId = roomRef ? resolveRoom(api, *roomRef).id : 0;
     int64_t catId = 0;
     CategoryTree tree;
     if (catPath)
@@ -369,7 +475,7 @@ int cmdAdd(Api &api, std::vector<std::string> args)
         catId = resolveCategory(tree, *catPath);
     }
     auto t = api.add(joinArgs(args, 1), catId, priority.value_or(0), deadline.value_or(""),
-                     description.value_or(""));
+                     description.value_or(""), roomId);
     std::cout << "Added ";
     printTodo(t);
     if (catId)
@@ -583,9 +689,248 @@ int cmdCategory(Api &api, const std::vector<std::string> &args)
                      "' (try: ls, add, rename, mv, rm, archive, unarchive, style)");
 }
 
+// ── rooms ──
+
+int cmdRoom(Api &api, std::vector<std::string> args)
+{
+    const std::string sub = args.size() > 1 ? args[1] : "ls";
+    auto need = [&](size_t n, const char *usage) {
+        if (args.size() < n)
+            throw UsageError(std::string("usage: todo room ") + usage);
+    };
+
+    if (sub == "ls" || sub == "list")
+    {
+        auto list = api.rooms();
+        if (list.empty())
+        {
+            std::cout << c("2", "No rooms yet. Create one with: todo room add <name> [topic]") << "\n";
+            return 0;
+        }
+        const auto todos = api.list("pending", true);
+        size_t nameWidth = 0;
+        for (const auto &r : list)
+            nameWidth = std::max(nameWidth, r.name.size());
+        for (const auto &r : list)
+        {
+            const auto open = std::count_if(todos.begin(), todos.end(),
+                                            [&](const TodoItem &t) { return t.roomId == r.id; });
+            std::cout << c("1;36", r.name) << std::string(nameWidth - r.name.size() + 2, ' ');
+            if (!r.topic.empty())
+                std::cout << r.topic << "  ";
+            std::string meta = std::to_string(open) + " open";
+            if (!r.members.empty())
+            {
+                meta += " · ";
+                for (size_t i = 0; i < r.members.size(); ++i)
+                    meta += (i ? ", " : "") + r.members[i].first;
+            }
+            if (r.lastMessageId)
+                meta += " · last #" + std::to_string(r.lastMessageId);
+            std::cout << c("2", meta) << "\n";
+        }
+        return 0;
+    }
+
+    if (sub == "add")
+    {
+        need(3, "add <NAME> [TOPIC...]");
+        auto r = api.addRoom(args[2], joinArgs(args, 3));
+        std::cout << "Created room " << c("1;36", r.name) << c("2", "  (#" + std::to_string(r.id) + ")")
+                  << "\n";
+        return 0;
+    }
+
+    if (sub == "topic")
+    {
+        need(4, "topic <ROOM> <TEXT...|none>");
+        const auto room = resolveRoom(api, args[2]);
+        std::string topic = joinArgs(args, 3);
+        if (topic == "none")
+            topic.clear();
+        api.updateRoom(room.id, std::nullopt, topic);
+        std::cout << c("1;36", room.name) << ": " << (topic.empty() ? c("2", "no topic") : topic) << "\n";
+        return 0;
+    }
+
+    if (sub == "rename")
+    {
+        need(4, "rename <ROOM> <NAME>");
+        const auto room = resolveRoom(api, args[2]);
+        auto r = api.updateRoom(room.id, joinArgs(args, 3), std::nullopt);
+        std::cout << "Renamed " << room.name << " to " << c("1;36", r.name) << "\n";
+        return 0;
+    }
+
+    if (sub == "rm" || sub == "delete")
+    {
+        need(3, "rm <ROOM>");
+        const auto room = resolveRoom(api, args[2]);
+        api.removeRoom(room.id);
+        std::cout << "Deleted room " << room.name << " and its messages; its todos stay\n";
+        return 0;
+    }
+
+    if (sub == "forget")
+    {
+        need(4, "forget <ROOM> <NAME...>");
+        const auto room = resolveRoom(api, args[2]);
+        int status = 0;
+        for (size_t i = 3; i < args.size(); ++i)
+        {
+            try
+            {
+                api.removeMember(room.id, args[i]);
+                std::cout << "Removed " << c("35", args[i]) << " from " << c("1;36", room.name) << "\n";
+            }
+            catch (const ApiError &e)
+            {
+                if (e.offline)
+                    throw;
+                std::cerr << args[i] << ": " << e.what() << "\n";
+                status = 1;
+            }
+        }
+        return status;
+    }
+
+    if (sub == "show")
+    {
+        auto n = takeOpt(args, "-n", "--lines");
+        need(3, "show <ROOM> [-n N]");
+        const auto room = resolveRoom(api, args[2]);
+        const size_t count = n ? static_cast<size_t>(parseId(*n)) : 20;
+
+        std::cout << c("1;36", room.name) << c("2", "  (#" + std::to_string(room.id) + ")") << "\n";
+        if (!room.topic.empty())
+            std::cout << room.topic << "\n";
+        if (!room.members.empty())
+        {
+            std::cout << c("1", "\nMembers") << "\n";
+            for (const auto &[name, seen] : room.members)
+                std::cout << "  " << c(name == gAgent ? "1;32" : "35", name) << c("2", "  " + rooms::ago(seen))
+                          << "\n";
+        }
+
+        std::vector<TodoItem> todos;
+        for (const auto &t : api.list("all", true))
+            if (t.roomId == room.id)
+                todos.push_back(t);
+        std::stable_sort(todos.begin(), todos.end(), todo::listOrder);
+        std::cout << c("1", "\nTodos") << "\n";
+        if (todos.empty())
+            std::cout << c("2", "  none (add one with: todo add -r " + room.name + " <title>)") << "\n";
+        size_t idWidth = 1;
+        for (const auto &t : todos)
+            idWidth = std::max(idWidth, t.idLabel().size());
+        for (const auto &t : todos)
+            printTodo(t, 2, idWidth, "", false);
+
+        std::cout << c("1", "\nMessages") << "\n";
+        auto msgs = api.messages(room.id, 0, count);
+        if (msgs.empty())
+            std::cout << c("2", "  none yet (todo room say " + room.name + " <text>)") << "\n";
+        for (const auto &m : msgs)
+            printMessage(m, 2);
+        return 0;
+    }
+
+    if (sub == "say" || sub == "post")
+    {
+        need(4, "say <ROOM> <TEXT...|->");
+        const auto room = resolveRoom(api, args[2]);
+        std::string text = joinArgs(args, 3);
+        if (text == "-")
+        {
+            std::ostringstream in;
+            in << std::cin.rdbuf();
+            text = in.str();
+        }
+        printMessage(api.post(room.id, text));
+        return 0;
+    }
+
+    if (sub == "read")
+    {
+        auto since = takeOpt(args, "--since", "--since");
+        auto n = takeOpt(args, "-n", "--lines");
+        need(3, "read <ROOM> [--since ID] [-n N]");
+        const auto room = resolveRoom(api, args[2]);
+        const int64_t after = since ? parseCursor(*since) : 0;
+        const size_t count = n ? static_cast<size_t>(parseId(*n)) : since ? 1000 : 20;
+        for (const auto &m : api.messages(room.id, after, count))
+            printMessage(m);
+        return 0;
+    }
+
+    if (sub == "wait")
+    {
+        auto since = takeOpt(args, "--since", "--since");
+        auto t = takeOpt(args, "-t", "--timeout");
+        need(3, "wait <ROOM> [--since ID] [-t SECONDS]");
+        const auto room = resolveRoom(api, args[2]);
+        const int64_t after = since ? parseCursor(*since) : room.lastMessageId;
+        double left = t ? std::atof(t->c_str()) : 60;
+        if (left < 0)
+            throw UsageError("the timeout can't be negative");
+        // Waits in short stretches: servers drop requests idle for a minute.
+        constexpr double kChunk = 50;
+        do
+        {
+            const double chunk = std::min(left, kChunk);
+            auto msgs = api.messages(room.id, after, 1000, chunk);
+            if (!msgs.empty())
+            {
+                for (const auto &m : msgs)
+                    printMessage(m);
+                return 0;
+            }
+            left -= chunk;
+        } while (left > 0);
+        return 1;
+    }
+
+    throw UsageError("unknown `todo room` command '" + sub +
+                     "' (try: ls, add, topic, rename, rm, show, say, read, wait)");
+}
+
 int run(Api &api, const std::vector<std::string> &args)
 {
     const std::string &cmd = args[0];
+    loadRoomNames(api);
+
+    if (cmd == "room" || cmd == "rooms")
+        return cmdRoom(api, args);
+
+    if (cmd == "claim" || cmd == "release")
+    {
+        auto rest = args;
+        const auto force = std::find(rest.begin(), rest.end(), "--force");
+        const bool forced = force != rest.end();
+        if (forced)
+            rest.erase(force);
+        if (rest.size() < 2)
+            throw UsageError("usage: todo " + cmd + " <id...> [--force]");
+        if (gAgent.empty())
+            throw UsageError("say who you are: --as NAME or $TODO_AGENT");
+        for (size_t i = 1; i < rest.size(); ++i)
+        {
+            const auto id = parseId(rest[i]);
+            try
+            {
+                printTodo(cmd == "claim" ? api.claim(id, forced) : api.release(id, forced));
+            }
+            catch (const ApiError &e)
+            {
+                if (e.offline || forced || std::string(e.what()).find("claimed by") == std::string::npos)
+                    throw;
+                throw ApiError(std::string(e.what()) + " (--force to " +
+                                   (cmd == "claim" ? "take it over" : "release it anyway") + ")",
+                               false);
+            }
+        }
+        return 0;
+    }
 
     if (cmd == "list" || cmd == "ls")
         return cmdList(api, args);
@@ -643,10 +988,23 @@ int run(Api &api, const std::vector<std::string> &args)
     {
         auto rest = args;
         auto [priority, deadline] = takeExtras(rest);
-        if (rest.size() < 2 || (!priority && !deadline))
-            throw UsageError("usage: todo set <id...> [-p PRI] [-d DUE]   (PRI/DUE \"none\" clears)");
+        auto roomRef = takeOpt(rest, "-r", "--room");
+        if (rest.size() < 2 || (!priority && !deadline && !roomRef))
+            throw UsageError(
+                "usage: todo set <id...> [-p PRI] [-d DUE] [-r ROOM]   (\"none\" clears each)");
+        std::optional<int64_t> roomId;
+        if (roomRef)
+            roomId = *roomRef == "none" || *roomRef == "-" ? 0 : resolveRoom(api, *roomRef).id;
         for (size_t i = 1; i < rest.size(); ++i)
-            printTodo(api.setExtras(parseId(rest[i]), priority, deadline));
+        {
+            const auto id = parseId(rest[i]);
+            TodoItem t;
+            if (priority || deadline)
+                t = api.setExtras(id, priority, deadline);
+            if (roomId)
+                t = api.setRoom(id, *roomId);
+            printTodo(t);
+        }
         return 0;
     }
 
@@ -724,6 +1082,7 @@ int run(Api &api, const std::vector<std::string> &args)
 int main(int argc, char *argv[])
 {
     std::string server = defaultServer();
+    gAgent = rooms::defaultAgent();
 
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i)
@@ -731,6 +1090,8 @@ int main(int argc, char *argv[])
         std::string a = argv[i];
         if ((a == "-s" || a == "--server") && i + 1 < argc)
             server = argv[++i];
+        else if (a == "--as" && i + 1 < argc)
+            gAgent = argv[++i];
         else if (a == "-h" || a == "--help")
             return usage(), 0;
         else
@@ -745,7 +1106,7 @@ int main(int argc, char *argv[])
             std::cerr << c("31", "error: ") << "the UI needs a terminal\n";
             return 1;
         }
-        Api api(server, 2.0);
+        Api api(server, 2.0, gAgent);
         return runTui(api);
     }
     if (args.empty())
@@ -762,7 +1123,7 @@ int main(int argc, char *argv[])
 
     try
     {
-        Api api(server);
+        Api api(server, 5.0, gAgent);
         return run(api, args);
     }
     catch (const std::exception &e)

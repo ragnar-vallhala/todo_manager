@@ -21,6 +21,9 @@ add_executable(todo_server
   server/TodoStore.cc
   server/TodoController.cc
   server/CategoryController.cc
+  server/RoomController.cc
+  server/RoomHub.cc
+  server/McpController.cc
   server/ThemeController.cc)
 target_include_directories(todo_server PRIVATE common)
 target_link_libraries(todo_server PRIVATE Drogon::Drogon)

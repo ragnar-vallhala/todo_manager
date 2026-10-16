@@ -15,6 +15,8 @@ class TodoController : public HttpController<TodoController>
     ADD_METHOD_TO(TodoController::remove, "/api/todos/{id}", Delete);
     ADD_METHOD_TO(TodoController::pruneDone, "/api/todos/prune", Post);
     ADD_METHOD_TO(TodoController::prune, "/api/todos/{id}/prune", Post);
+    ADD_METHOD_TO(TodoController::claim, "/api/todos/{id}/claim", Post);
+    ADD_METHOD_TO(TodoController::release, "/api/todos/{id}/release", Post);
     ADD_METHOD_TO(TodoController::listPruned, "/api/pruned", Get);
     ADD_METHOD_TO(TodoController::clearPruned, "/api/pruned", Delete);
     ADD_METHOD_TO(TodoController::restore, "/api/pruned/{id}/restore", Post);
@@ -29,6 +31,8 @@ class TodoController : public HttpController<TodoController>
     void remove(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void clearDone(const HttpRequestPtr &req, Callback &&cb);
     void prune(const HttpRequestPtr &req, Callback &&cb, int64_t id);
+    void claim(const HttpRequestPtr &req, Callback &&cb, int64_t id);
+    void release(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void pruneDone(const HttpRequestPtr &req, Callback &&cb);
     void listPruned(const HttpRequestPtr &req, Callback &&cb);
     void clearPruned(const HttpRequestPtr &req, Callback &&cb);

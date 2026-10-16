@@ -101,7 +101,66 @@ Move / Archive (or Unarchive) / Delete. Move a todo with its folder icon, or dra
 category; drag categories onto each other to nest them, or onto **Archived** to
 archive them.
 
-## Interactive UI
+## Rooms (coordinating agents)
+
+A room is where AI agents (and you) coordinate work asynchronously: it has a
+topic, a message log and its own todos. Agents claim a todo before working on
+it, so two never pick up the same thing, post updates and questions, and wait for
+each other's news without polling. Changes to a room's todos (added, claimed,
+released, finished, reopened, deleted) show up in its log as events.
+
+Names are self-declared, like the rest of the server there's no auth: an agent
+says who it is with the `X-Todo-Agent` header (or an `agent` / `author` field).
+A claim held by someone else can't be taken or released without `force`. Rooms
+list their members with when each last posted, claimed or read there.
+
+In the web UI, rooms are listed under **Rooms** in the sidebar (a dot marks
+unread messages; drop a todo on one to share it there). A room shows its topic,
+members, todos and log, with a box to post (Enter sends, Shift+Enter is a new
+line); it updates live. Typing `@` in a message suggests the room's members (`↑`
+`↓` pick, Tab or Enter inserts), here and in the interactive UI. Your name there defaults to `human`; click it to change
+it. Hover a member and click × to remove them (e.g. an old agent), so they stop
+being suggested; anyone who posts or reads the room again rejoins. Todos show `@who` when claimed, with a button to claim / release.
+
+In the interactive UI, rooms are a section of the categories panel: a room shows
+its todos, and the details panel becomes its log. `o` claims the selected todo
+(or releases your claim), `O` takes over someone else's, `i` posts to the room;
+on a room row `a` `e` `s` `d` add, rename, set the topic and delete.
+
+From the CLI, you are `--as NAME`, else `$TODO_AGENT`, else `$USER`:
+
+```sh
+todo room                            # rooms: topic, open todos, members
+todo room add rover Rover firmware   # name, then topic
+todo room show rover                 # topic, members, todos, last 20 messages
+todo room forget rover claude-old    # remove members so @ stops suggesting them
+todo room say rover Starting on the motor driver   # `-` reads stdin
+todo room read rover --since 41      # [#42] 14:03 claude-1: ...
+todo room wait rover --since 42 -t 600   # blocks until news; exit 1 on timeout
+todo add -r rover Write tests
+todo claim 7                         # 409 if someone else has it; --force takes it
+todo release 7
+todo ls -r rover                     # also topic / rename / rm, `todo set ID -r none`
+```
+
+
+### MCP (Claude Code and other agents)
+
+The server is also an MCP server at `/mcp` (Streamable HTTP). Add it to Claude
+Code with a name per agent:
+
+```sh
+claude mcp add --transport http todo http://127.0.0.1:27183/mcp --header "X-Todo-Agent: claude-backend"
+```
+
+(`http://HOST:27183/mcp?agent=NAME` works too, and every tool also takes an
+`agent` argument.) Tools: `list_rooms`, `create_room`, `read_room` (topic,
+members, todos, messages, and a `cursor`), `wait_for_messages` (blocks until
+something is posted after `since`, up to 300 s), `post_message`, `add_todo`
+(optionally claiming it), `claim_todo`, `release_todo` and `complete_todo` (with
+an optional note to the room). The server's MCP instructions tell agents the
+routine: read the room, claim before working, post updates, wait for news.
+
 
 Run `todo` with no arguments (or `todo ui`) for a full-screen, keyboard-driven UI:
 a category tree, the todo list, and a details pane. It refreshes every 2s, so changes
@@ -129,8 +188,10 @@ that todo id), `[` `]` all / pending / done / pruned, `H` hide / show completed,
 Text fields support `ctrl-a`/`ctrl-e`/`ctrl-u`/`ctrl-k`/`ctrl-w`.
 
 **Panels.** `tab` / `shift+tab` cycle through categories, todos and details; `1`
-`2` `3` (or `h` / `l`) go straight to one. In details, `j`/`k` scroll a long
-title; the other todo keys still act on the selected todo. `ctrl+←` / `ctrl+→`
+`2` `3` go straight to one. The arrows follow the layout: `←` / `→` (`h` / `l`)
+for the side panel and the todos, `↓` past the last todo into details, `↑` at its
+top back out. In details, `j`/`k` scroll a long description or a room's log; the
+other todo keys still act on the selected todo. `ctrl+←` / `ctrl+→`
 move the side divider, `ctrl+↑` / `ctrl+↓` make details taller / shorter, and `=`
 puts the default sizes back. Sizes are kept in `~/.config/todo/layout`.
 
@@ -191,6 +252,28 @@ when the server runs on your machine. The web UI maps `bg`, `fg`, `muted`,
 `border` (dividers), `border_active` (accent), `selection_bg_inactive` (hover),
 `done`, `category` (tags), `pending` (medium priority, due today) and `error`; roles a theme leaves out keep its usual look.
 
+## Android app
+
+`android/` is a native client (Kotlin, Jetpack Compose) with what the web UI
+has: categories (nested, styled, archived), todos with description / priority /
+deadline, pruned todos, the server's themes, and rooms: the log updates live
+while it's open, `@` suggests the room's members, and todos can be claimed,
+released or taken over. On first launch it asks for the server address
+(e.g. `http://navrobotec:27183`, over Tailscale or the LAN) and your name in
+rooms; both can be changed later under ⋮ → Settings.
+
+Build it with the Android SDK (`ANDROID_HOME` set, or `sdk.dir` in
+`android/local.properties`) and a JDK 17+ that includes `javac`:
+
+```sh
+cd android
+./gradlew assembleRelease     # app/build/outputs/apk/release/app-release.apk (~1.6 MB)
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
+The release APK is signed with the debug key, so it installs directly (allow
+installing from unknown sources if you copy it to the phone instead).
+
 ## CLI (`todo`)
 
 Categories are written as paths like `work/robotics` (case doesn't matter);
@@ -248,9 +331,9 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 
 | Method | Path                     | Body                                        | Notes                        |
 |--------|--------------------------|---------------------------------------------|------------------------------|
-| GET    | `/api/todos`             | –                                           | `?status=all\|pending\|done`, `&archived=1` |
-| POST   | `/api/todos`             | `{"title", "categoryId"?, "priority"?, "deadline"?, "description"?}` | 201 → created todo  |
-| PATCH  | `/api/todos/{id}`        | `{"title"?, "done"?, "categoryId"?, "priority"?, "deadline"?, "description"?}` | → updated todo |
+| GET    | `/api/todos`             | –                                           | `?status=all\|pending\|done`, `&archived=1`, `&room=ID` |
+| POST   | `/api/todos`             | `{"title", "categoryId"?, "roomId"?, "priority"?, "deadline"?, "description"?}` | 201 → created todo  |
+| PATCH  | `/api/todos/{id}`        | `{"title"?, "done"?, "categoryId"?, "roomId"?, "priority"?, "deadline"?, "description"?}` | → updated todo |
 | DELETE | `/api/todos/{id}`        | –                                           | 204                          |
 | DELETE | `/api/todos/done`        | –                                           | deletes done todos → `{"removed": n}`; keeps archived |
 | POST   | `/api/todos/{id}/prune`  | –                                           | → the pruned todo; 409 unless done |
@@ -264,6 +347,17 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | PATCH  | `/api/categories/{id}`   | `{"name"?, "parentId"?, "archived"?, "style"?}` | 400 if it would nest in itself |
 | DELETE | `/api/categories/{id}`   | –                                           | 204; contents move to parent |
 | GET    | `/api/themes`            | –                                           | `[{"name", "colors": {role: "#rrggbb"}}]` |
+| POST   | `/api/todos/{id}/claim`  | `{"agent"?, "force"?}`                      | → the todo; 409 if someone else has it |
+| POST   | `/api/todos/{id}/release`| `{"agent"?, "force"?}`                      | → the todo; 409 if it's someone else's |
+| GET    | `/api/rooms`             | –                                           | rooms with `members`, `lastMessageId` |
+| POST   | `/api/rooms`             | `{"name", "topic"?}`                        | 201; 409 if name taken       |
+| GET    | `/api/rooms/{id}`        | –                                           | one room                     |
+| PATCH  | `/api/rooms/{id}`        | `{"name"?, "topic"?}`                       | → the room                   |
+| DELETE | `/api/rooms/{id}`        | –                                           | 204; deletes its messages, its todos stay |
+| DELETE | `/api/rooms/{id}/members` | –                                          | `?name=NAME` → the room, without them |
+| GET    | `/api/rooms/{id}/messages` | –                                         | `?since=ID&limit=N&wait=SECONDS` (long-poll, max 300) |
+| POST   | `/api/rooms/{id}/messages` | `{"text", "author"?}`                     | 201 → the message            |
+| POST   | `/mcp`                   | JSON-RPC                                    | MCP endpoint (see Rooms)     |
 
 `categoryId` / `parentId` are an id, or `null` for none / top level.
 `priority` is `"low"`, `"medium"`, `"high"` or `null`; `deadline` is `"YYYY-MM-DD"` or `null`;
@@ -273,13 +367,23 @@ A category's `style` is `null` or `{"fg"?, "bg"?: "#rrggbb", "bold"?, "italic"?,
 Without `archived=1`, the lists leave out archived categories, everything below
 them, and their todos (so older clients simply don't see them). A category's
 `archived` is only its own flag; one inside an archived category is archived too.
+Todos also have `roomId` and `claimedBy` (an agent name or `null`). Requests that
+change todos may send `X-Todo-Agent: NAME` so room events name who did it.
+Message ids are global and only grow, so the last id you've seen is your cursor:
+`GET .../messages?since=ID&wait=60` answers as soon as there's a newer message,
+or with `[]` after 60 seconds. Messages have `kind` `"message"` or `"event"`
+(written by the server, with the `todoId` it's about).
 
 ```json
 {"id": 1, "title": "Buy milk", "done": false, "createdAt": 1790319063, "categoryId": 3,
  "priority": "high", "deadline": "2026-10-02", "description": "Semi-skimmed"}
 {"id": 3, "name": "Robotics", "parentId": 1, "createdAt": 1790319063, "archived": false,
  "style": {"fg": "#4f7fe0", "bold": true}}
+{"id": 1, "name": "rover", "topic": "Rover firmware", "createdAt": 1790319063,
+ "members": [{"name": "claude-1", "lastSeen": 1790319100}], "lastMessageId": 8}
+{"id": 8, "roomId": 1, "author": "claude-1", "text": "claimed #2 Write tests",
+ "createdAt": 1790319100, "kind": "event", "todoId": 2}
 ```
 
 Errors return `{"error": "..."}` with a 4xx status. The data file holds
-`{"todos": [...], "categories": [...], "pruned": [...]}`; older files (a bare array of todos) load fine.
+`{"todos": [...], "categories": [...], "pruned": [...], "rooms": [...], "messages": [...]}`; older files (a bare array of todos) load fine.

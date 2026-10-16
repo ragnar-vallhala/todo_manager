@@ -22,8 +22,10 @@
     <nav id="sidebar" aria-label="Categories">
       <ul id="nav-fixed" class="nav"></ul>
       <ul id="nav-tree" class="nav"></ul>
-      <ul id="nav-archive" class="nav"></ul>
       <button id="new-category" class="quiet small">New category</button>
+      <ul id="nav-rooms" class="nav"></ul>
+      <button id="new-room" class="quiet small">New room</button>
+      <ul id="nav-archive" class="nav"></ul>
       <button id="theme-btn" class="quiet small">Theme</button>
     </nav>
 
@@ -49,9 +51,28 @@
             <button role="menuitem" data-action="style">Style…</button>
             <button role="menuitem" data-action="archive">Archive</button>
             <button role="menuitem" data-action="delete" class="danger">Delete</button>
+            <button role="menuitem" data-action="room-rename">Rename</button>
+            <button role="menuitem" data-action="room-topic">Topic…</button>
+            <button role="menuitem" data-action="room-delete" class="danger">Delete room</button>
           </div>
         </div>
       </header>
+
+      <section id="room-info" class="room-info" hidden>
+        <p id="room-topic" class="room-topic"></p>
+        <p id="room-members" class="room-members"></p>
+      </section>
+
+      <section id="room-log-section" class="room-log-section" hidden>
+        <h2 class="log-title">Messages</h2>
+        <ol id="room-log" class="room-log" aria-live="polite"></ol>
+        <p id="room-log-empty" class="empty small" hidden>No messages yet. Agents post here, and changes to this room's todos show up too.</p>
+        <form id="room-post" autocomplete="off">
+          <label for="room-text" class="visually-hidden">Message</label>
+          <textarea id="room-text" rows="2" maxlength="10000" aria-autocomplete="list" aria-controls="mentions"></textarea>
+          <ul id="mentions" class="menu mentions" role="listbox" hidden></ul>
+        </form>
+      </section>
 
       <form id="add-form" autocomplete="off">
         <label for="new-title" class="visually-hidden">New todo</label>
@@ -72,6 +93,7 @@
         <ul id="done-list" class="list" hidden></ul>
       </section>
 
+
       <p id="error" class="error" role="alert" hidden></p>
     </main>
   </div>
@@ -83,25 +105,36 @@
       <button class="check" role="checkbox" aria-checked="false">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8.5l2.5 2.5L12 5.5"/></svg>
       </button>
-      <span class="prio"></span>
       <div class="body">
-        <span class="title" tabindex="0"></span>
+        <div class="title-row">
+          <span class="prio"></span>
+          <span class="title" tabindex="0"></span>
+        </div>
+        <div class="item-meta">
+          <span class="due"></span>
+          <span class="tag"></span>
+          <span class="room-tag"></span>
+          <span class="claimed"></span>
+        </div>
         <p class="desc" hidden></p>
       </div>
-      <span class="tag"></span>
-      <span class="due"></span>
-      <button class="plan quiet icon" aria-label="Description, priority and deadline">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/></svg>
-      </button>
-      <button class="move quiet icon" aria-label="Move to category">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H8L6.5 3.5h-3a1 1 0 0 0-1 1zM7 9h4M9.5 7.5L11 9l-1.5 1.5"/></svg>
-      </button>
-      <button class="prune quiet icon" aria-label="Prune (frees its number)" hidden>
-        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="11.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/><path d="M5.8 10L12 2.5M10.2 10L4 2.5"/></svg>
-      </button>
-      <button class="delete quiet icon" aria-label="Delete">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
-      </button>
+      <div class="actions">
+        <button class="claim quiet icon" aria-label="Claim" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="5.5" r="2.5"/><path d="M3.5 13.5c.6-2.4 2.4-3.7 4.5-3.7s3.9 1.3 4.5 3.7"/></svg>
+        </button>
+        <button class="plan quiet icon" aria-label="Description, priority and deadline">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/></svg>
+        </button>
+        <button class="move quiet icon" aria-label="Move to category">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H8L6.5 3.5h-3a1 1 0 0 0-1 1zM7 9h4M9.5 7.5L11 9l-1.5 1.5"/></svg>
+        </button>
+        <button class="prune quiet icon" aria-label="Prune (frees its number)" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="11.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/><path d="M5.8 10L12 2.5M10.2 10L4 2.5"/></svg>
+        </button>
+        <button class="delete quiet icon" aria-label="Delete">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+        </button>
+      </div>
     </li>
   </template>
 

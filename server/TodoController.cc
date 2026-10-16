@@ -2,6 +2,8 @@
 #include "HttpUtil.h"
 #include "TodoStore.h"
 
+#include <cstdlib>
+
 using http::error;
 using http::json;
 
@@ -42,25 +44,39 @@ std::string parseExtras(const Json::Value &body, TodoPatch &patch)
             return "description must be at most 10000 characters";
         patch.description = d;
     }
+    if (!http::parseRef(body, "roomId", patch.roomId))
+        return "roomId must be an id or null";
     return "";
+}
+
+// The agent making a change (X-Todo-Agent or ?agent=), for room announcements.
+std::string actor(const HttpRequestPtr &req)
+{
+    std::string err;
+    return http::agent(req, nullptr, "agent", err);
 }
 }  // namespace
 
-// GET /api/todos[?status=all|pending|done][&archived=1]
+// GET /api/todos[?status=all|pending|done][&archived=1][&room=ID]
 void TodoController::list(const HttpRequestPtr &req, Callback &&cb)
 {
     const auto status = req->getParameter("status");
+    const auto room = req->getParameter("room");
+    const int64_t roomId = std::atoll(room.c_str());
     Json::Value arr(Json::arrayValue);
     for (const auto &t : TodoStore::get().list(http::wantsArchived(req)))
     {
         if ((status == "pending" && t.done) || (status == "done" && !t.done))
+            continue;
+        if (!room.empty() && t.roomId != roomId)
             continue;
         arr.append(t.toJson());
     }
     cb(json(arr));
 }
 
-// POST /api/todos  {"title": "...", "categoryId"?: id|null, "priority"?, "deadline"?, "description"?}
+// POST /api/todos  {"title": "...", "categoryId"?: id|null, "roomId"?: id|null,
+//                   "priority"?, "deadline"?, "description"?}
 void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
 {
     auto body = req->getJsonObject();
@@ -83,9 +99,10 @@ void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
     init.priority = extras.priority.value_or(0);
     init.deadline = extras.deadline.value_or("");
     init.description = extras.description.value_or("");
+    init.roomId = extras.roomId.value_or(0);
     try
     {
-        cb(json(TodoStore::get().add(title, init).toJson(), k201Created));
+        cb(json(TodoStore::get().add(title, init, actor(req)).toJson(), k201Created));
     }
     catch (const StoreError &e)
     {
@@ -95,7 +112,7 @@ void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
 
 // PATCH /api/todos/{id}  {"title"?: "...", "done"?: bool, "categoryId"?: id|null,
 //                         "priority"?: "low"|"medium"|"high"|null, "deadline"?: "YYYY-MM-DD"|null,
-//                         "description"?: "..."|null}
+//                         "description"?: "..."|null, "roomId"?: id|null}
 void TodoController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     auto body = req->getJsonObject();
@@ -126,7 +143,7 @@ void TodoController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id
 
     try
     {
-        auto t = TodoStore::get().update(id, patch);
+        auto t = TodoStore::get().update(id, patch, actor(req));
         if (!t)
             return cb(error(404, "todo not found"));
         cb(json(t->toJson()));
@@ -138,9 +155,9 @@ void TodoController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id
 }
 
 // DELETE /api/todos/{id}
-void TodoController::remove(const HttpRequestPtr &, Callback &&cb, int64_t id)
+void TodoController::remove(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
-    if (!TodoStore::get().remove(id))
+    if (!TodoStore::get().remove(id, actor(req)))
         return cb(error(404, "todo not found"));
     cb(HttpResponse::newHttpResponse(k204NoContent, CT_NONE));
 }
@@ -151,6 +168,45 @@ void TodoController::clearDone(const HttpRequestPtr &, Callback &&cb)
     Json::Value body;
     body["removed"] = static_cast<Json::UInt64>(TodoStore::get().clearDone());
     cb(json(body));
+}
+
+// ── Claims ──
+
+namespace
+{
+// POST /api/todos/{id}/claim|release  {"agent"?: "...", "force"?: bool}
+void claimOrRelease(const HttpRequestPtr &req, TodoController::Callback &cb, int64_t id, bool claim)
+{
+    auto body = req->getJsonObject();
+    std::string err;
+    const auto agent = http::agent(req, body.get(), "agent", err);
+    if (!err.empty())
+        return cb(error(400, err));
+    if (agent.empty())
+        return cb(error(400, "say who you are: \"agent\", or the X-Todo-Agent header"));
+    const bool force = body && (*body)["force"].asBool();
+    try
+    {
+        auto &store = TodoStore::get();
+        cb(json((claim ? store.claim(id, agent, force) : store.release(id, agent, force)).toJson()));
+    }
+    catch (const StoreError &e)
+    {
+        cb(error(e));
+    }
+}
+}  // namespace
+
+// POST /api/todos/{id}/claim  -- 409 if someone else has it, unless "force"
+void TodoController::claim(const HttpRequestPtr &req, Callback &&cb, int64_t id)
+{
+    claimOrRelease(req, cb, id, true);
+}
+
+// POST /api/todos/{id}/release  -- someone else's claim needs "force"
+void TodoController::release(const HttpRequestPtr &req, Callback &&cb, int64_t id)
+{
+    claimOrRelease(req, cb, id, false);
 }
 
 // ── Pruned ──
