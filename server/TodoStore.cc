@@ -106,6 +106,51 @@ bool isValidDate(const std::string &date)
     return d <= days[m - 1] + (m == 2 && leap);
 }
 
+Json::Value Attachment::toJson() const
+{
+    Json::Value v;
+    v["id"] = id;
+    v["name"] = name;
+    v["type"] = type;
+    v["size"] = static_cast<Json::Int64>(size);
+    if (width && height)
+    {
+        v["width"] = width;
+        v["height"] = height;
+    }
+    return v;
+}
+
+Attachment Attachment::fromJson(const Json::Value &v)
+{
+    Attachment a;
+    a.id = v["id"].asString();
+    a.name = v["name"].asString();
+    a.type = v["type"].asString();
+    a.size = v["size"].asInt64();
+    a.width = v["width"].asInt();
+    a.height = v["height"].asInt();
+    return a;
+}
+
+Json::Value attachmentsJson(const std::vector<Attachment> &list)
+{
+    Json::Value arr(Json::arrayValue);
+    for (const auto &a : list)
+        arr.append(a.toJson());
+    return arr;
+}
+
+std::vector<Attachment> readAttachments(const Json::Value &v)
+{
+    std::vector<Attachment> out;
+    if (v.isArray())
+        for (const auto &a : v)
+            if (a.isObject() && a["id"].isString())
+                out.push_back(Attachment::fromJson(a));
+    return out;
+}
+
 Json::Value Todo::toJson() const
 {
     Json::Value v;
@@ -121,6 +166,8 @@ Json::Value Todo::toJson() const
         v["prunedAt"] = static_cast<Json::Int64>(prunedAt);
     v["roomId"] = idOrNull(roomId);
     v["claimedBy"] = claimedBy.empty() ? Json::Value() : Json::Value(claimedBy);
+    if (!attachments.empty())
+        v["attachments"] = attachmentsJson(attachments);
     return v;
 }
 
@@ -156,6 +203,8 @@ Json::Value Message::toJson() const
     v["todoId"] = idOrNull(todoId);
     if (prunedAt)
         v["prunedAt"] = static_cast<Json::Int64>(prunedAt);
+    if (!attachments.empty())
+        v["attachments"] = attachmentsJson(attachments);
     return v;
 }
 
@@ -269,6 +318,7 @@ void TodoStore::load()
         t.prunedAt = v["prunedAt"].asInt64();
         t.roomId = v["roomId"].isNull() ? 0 : v["roomId"].asInt64();
         t.claimedBy = v["claimedBy"].isString() ? v["claimedBy"].asString() : "";
+        t.attachments = readAttachments(v["attachments"]);
         return t;
     };
     for (const auto &v : todos)
@@ -314,6 +364,7 @@ void TodoStore::load()
             m.kind = v["kind"].asString() == "event" ? "event" : "message";
             m.todoId = v["todoId"].isNull() ? 0 : v["todoId"].asInt64();
             m.prunedAt = v["prunedAt"].asInt64();
+            m.attachments = readAttachments(v["attachments"]);
             nextSeq_ = std::max(nextSeq_, m.seq + 1);
             insertBySeq(m.prunedAt ? prunedMessages_ : messages_, std::move(m));
         }
@@ -378,6 +429,7 @@ Todo TodoStore::add(const std::string &title, const Todo &init, const std::strin
     Todo t{freeId(todos_), title, false, nowSeconds(), init.categoryId, init.priority, init.deadline,
            init.description};
     t.roomId = init.roomId;
+    t.attachments = init.attachments;
     todos_.push_back(t);
     event(t, actor, "added");
     save();
@@ -412,6 +464,8 @@ std::optional<Todo> TodoStore::update(int64_t id, const TodoPatch &patch,
         it->description = *patch.description;
     if (patch.roomId)
         it->roomId = *patch.roomId;
+    if (patch.attachments)
+        it->attachments = *patch.attachments;
 
     if (it->roomId != before.roomId)
     {
@@ -733,7 +787,8 @@ void TodoStore::checkRoomName(const std::string &name, int64_t selfId)
 }
 
 const Message &TodoStore::append(int64_t roomId, const std::string &author,
-                                 const std::string &text, const std::string &kind, int64_t todoId)
+                                 const std::string &text, const std::string &kind, int64_t todoId,
+                                 const std::vector<Attachment> &attachments)
 {
     const int64_t now = nowSeconds();
     if (!author.empty())
@@ -746,8 +801,8 @@ const Message &TodoStore::append(int64_t roomId, const std::string &author,
         kMaxMessagesPerRoom)
         pruneAt(std::find_if(messages_.begin(), messages_.end(), inRoom), now);
 
-    messages_.push_back(
-        {freeMessageId(messages_, roomId), nextSeq_++, roomId, author, text, now, kind, todoId});
+    messages_.push_back({freeMessageId(messages_, roomId), nextSeq_++, roomId, author, text, now,
+                         kind, todoId, 0, attachments});
     if (listener_)
         listener_(roomId);
     return messages_.back();
@@ -852,11 +907,12 @@ void TodoStore::removeRoom(int64_t id)
     save();
 }
 
-Message TodoStore::post(int64_t roomId, const std::string &author, const std::string &text)
+Message TodoStore::post(int64_t roomId, const std::string &author, const std::string &text,
+                        const std::vector<Attachment> &attachments)
 {
     std::lock_guard<std::mutex> lock(mu_);
     checkRoomExists(roomId);
-    Message m = append(roomId, author, text, "message", 0);
+    Message m = append(roomId, author, text, "message", 0, attachments);
     save();
     return m;
 }

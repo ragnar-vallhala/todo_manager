@@ -1,9 +1,14 @@
 #include "McpController.h"
+#include "Files.h"
 #include "HttpUtil.h"
 #include "RoomHub.h"
 #include "Rooms.h"
 
+#include <drogon/utils/Utilities.h>
+
 #include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <memory>
 
 using http::json;
@@ -22,7 +27,9 @@ constexpr const char *kInstructions =
     "complete_todo.\n"
     "- To wait for others, call wait_for_messages with the cursor from your last read: it "
     "returns as soon as something new is posted.\n"
-    "Changes to room todos (added, claimed, finished...) show up in the log as events.";
+    "Changes to room todos (added, claimed, finished...) show up in the log as events.\n"
+    "- Messages can carry attachments (images, PDFs): look at one with get_file, and attach "
+    "your own by uploading it with upload_file and passing its id to post_message.";
 
 // ── JSON-RPC ──
 
@@ -135,9 +142,26 @@ Json::Value toolList()
          {"since", prop("integer", "Cursor from your last read_room / wait_for_messages")},
          {"timeout", prop("number", "Seconds to wait, at most 300 (default 60)")}},
         {"room", "since"}));
-    tools.append(tool("post_message", "Post a message to a room.",
-                      {{"room", roomProp()}, {"text", prop("string", "The message")}},
-                      {"room", "text"}));
+    Json::Value ids = prop("array", "Files to attach: {id, name} as upload_file returned them");
+    ids["items"]["type"] = "object";
+    ids["items"]["properties"]["id"] = prop("string", "The file's id");
+    ids["items"]["properties"]["name"] = prop("string", "The name to show");
+    ids["items"]["required"].append("id");
+    tools.append(tool("post_message", "Post a message to a room, optionally with attachments.",
+                      {{"room", roomProp()},
+                       {"text", prop("string", "The message (may be empty with attachments)")},
+                       {"attachments", ids}},
+                      {"room"}));
+    tools.append(tool("upload_file",
+                      "Upload an image (PNG, JPEG, GIF, WebP) or PDF, at most 10 MB, to attach "
+                      "to a message. Returns its id.",
+                      {{"name", prop("string", "File name, e.g. plot.png")},
+                       {"data", prop("string", "The file's bytes, base64-encoded")}},
+                      {"name", "data"}));
+    tools.append(tool("get_file",
+                      "Get a message's attachment by id: images come back as images, PDFs as "
+                      "an embedded resource.",
+                      {{"id", prop("string", "The attachment's id")}}, {"id"}));
     tools.append(tool(
         "add_todo", "Add a todo to a room, optionally claiming it right away.",
         {{"room", roomProp()},
@@ -296,8 +320,44 @@ void callTool(const std::string &name, const Json::Value &args, const std::strin
     {
         needAgent(agent);
         const auto r = roomArg(args);
-        return done(toolJson(
-            store.post(r.id, agent, stringArg(args, "text", true, rooms::kMaxMessage)).toJson()));
+        std::vector<Attachment> attachments;
+        if (auto msg = files::parseList(args["attachments"], attachments); !msg.empty())
+            throw ArgError(msg);
+        const auto text = stringArg(args, "text", attachments.empty(), rooms::kMaxMessage);
+        return done(toolJson(store.post(r.id, agent, text, attachments).toJson()));
+    }
+    if (name == "upload_file")
+    {
+        const auto fileName = stringArg(args, "name", true, 200);
+        const auto data = drogon::utils::base64Decode(stringArg(args, "data", true, files::kMaxSize * 2));
+        return done(toolJson(files::store(data, fileName).toJson()));
+    }
+    if (name == "get_file")
+    {
+        const auto id = stringArg(args, "id", true, 20);
+        const auto a = files::find(id);
+        if (!a)
+            throw StoreError(404, "no file " + id);
+        std::ifstream in(files::pathOf(id), std::ios::binary);
+        const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        Json::Value c;
+        if (a->type.rfind("image/", 0) == 0)
+        {
+            c["type"] = "image";
+            c["data"] = drogon::utils::base64Encode(data);
+            c["mimeType"] = a->type;
+        }
+        else
+        {
+            c["type"] = "resource";
+            c["resource"]["uri"] = "todo-file:" + a->id;
+            c["resource"]["mimeType"] = a->type;
+            c["resource"]["blob"] = drogon::utils::base64Encode(data);
+        }
+        Json::Value v;
+        v["content"].append(c);
+        v["isError"] = false;
+        return done(v);
     }
     if (name == "add_todo")
     {

@@ -13,6 +13,25 @@
 
 // Ids are positive; 0 means "none" (a root category / an uncategorized todo).
 
+// A file attached to a message or todo (see Files.h). The server fills in
+// everything but the name from the stored file.
+struct Attachment
+{
+    std::string id;    // the file's content hash
+    std::string name;  // as uploaded, e.g. "screenshot.png"
+    std::string type;  // "image/png", ..., "application/pdf"
+    int64_t size{0};   // bytes
+    int width{0}, height{0};  // pixels, for images whose header says; else 0
+
+    Json::Value toJson() const;
+    static Attachment fromJson(const Json::Value &v);
+};
+
+// As a JSON array; items with none leave the key out, so files without
+// attachments look as they did before.
+Json::Value attachmentsJson(const std::vector<Attachment> &list);
+std::vector<Attachment> readAttachments(const Json::Value &v);
+
 struct Todo
 {
     int64_t id{0};
@@ -28,6 +47,7 @@ struct Todo
     int64_t prunedAt{0};
     int64_t roomId{0};      // the room it's shared in; 0 for none
     std::string claimedBy;  // the agent working on it; "" for nobody
+    std::vector<Attachment> attachments;  // files that go with the description
 
     Json::Value toJson() const;
 };
@@ -49,11 +69,12 @@ struct TodoPatch
     std::optional<std::string> deadline;     // "" clears it
     std::optional<std::string> description;  // "" clears it
     std::optional<int64_t> roomId;           // 0 takes it out of its room
+    std::optional<std::vector<Attachment>> attachments;  // replaces the list
 
     bool empty() const
     {
         return !title && !done && !categoryId && !priority && !deadline && !description &&
-               !roomId;
+               !roomId && !attachments;
     }
 };
 
@@ -120,6 +141,7 @@ struct Message
     std::string kind{"message"};
     int64_t todoId{0};
     int64_t prunedAt{0};  // unix seconds it was pruned; 0 in the live log
+    std::vector<Attachment> attachments;
 
     Json::Value toJson() const;
 };
@@ -146,7 +168,8 @@ class TodoStore
     // `actor` (an agent name, or "") is who made the change; changes to room
     // todos are announced in the room under that name.
 
-    // Takes the category, room, priority, deadline and description from `init`.
+    // Takes the category, room, priority, deadline, description and
+    // attachments from `init`.
     Todo add(const std::string &title, const Todo &init, const std::string &actor = "");
     std::optional<Todo> update(int64_t id, const TodoPatch &patch, const std::string &actor = "");
     bool remove(int64_t id, const std::string &actor = "");
@@ -189,7 +212,9 @@ class TodoStore
     void removeRoom(int64_t id);
     // Drops `name` from the room's members (they rejoin if they show up again).
     Room removeMember(int64_t id, const std::string &name);
-    Message post(int64_t roomId, const std::string &author, const std::string &text);
+    // `text` may be empty when there are attachments.
+    Message post(int64_t roomId, const std::string &author, const std::string &text,
+                 const std::vector<Attachment> &attachments = {});
     // Messages with seq above `since`, oldest first, at most `limit` (the
     // newest ones if there are more). since 0 = from the start.
     std::vector<Message> messages(int64_t roomId, int64_t since, size_t limit) const;
@@ -231,7 +256,8 @@ class TodoStore
     void pruneAt(std::vector<Message>::iterator it, int64_t now);
     // Appends a message (and marks `author` as a member); callers save.
     const Message &append(int64_t roomId, const std::string &author, const std::string &text,
-                          const std::string &kind, int64_t todoId);
+                          const std::string &kind, int64_t todoId,
+                          const std::vector<Attachment> &attachments = {});
     // Announces a change to a room todo in its room, if it has one.
     void event(const Todo &t, const std::string &actor, const std::string &what);
 

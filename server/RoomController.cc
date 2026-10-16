@@ -1,4 +1,5 @@
 #include "RoomController.h"
+#include "Files.h"
 #include "HttpUtil.h"
 #include "RoomHub.h"
 #include "Rooms.h"
@@ -158,17 +159,25 @@ void RoomController::messages(const HttpRequestPtr &req, Callback &&cb, int64_t 
     });
 }
 
-// POST /api/rooms/{id}/messages  {"text": "...", "author"?: "..."}
-// The author can also come from the X-Todo-Agent header.
+// POST /api/rooms/{id}/messages  {"text": "...", "author"?: "...",
+//                                 "attachments"?: [{"id", "name"?}...]}
+// The author can also come from the X-Todo-Agent header. Attachments are
+// files uploaded first (POST /api/files); with some, the text may be empty.
 void RoomController::post(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     auto body = req->getJsonObject();
-    if (!body || !(*body)["text"].isString())
+    if (!body || !body->isObject())
         return cb(error(400, "body must be JSON with a \"text\" string"));
-    std::string text = (*body)["text"].asString();
+    std::vector<Attachment> attachments;
+    if (auto msg = files::parseList((*body)["attachments"], attachments); !msg.empty())
+        return cb(error(400, msg));
+    const auto &t = (*body)["text"];
+    if (!t.isString() && !(t.isNull() && !attachments.empty()))
+        return cb(error(400, "body must be JSON with a \"text\" string"));
+    std::string text = t.asString();
     text.erase(text.find_last_not_of(" \t\r\n") + 1);
     text.erase(0, text.find_first_not_of(" \t\r\n"));
-    if (text.empty() || text.size() > rooms::kMaxMessage)
+    if ((text.empty() && attachments.empty()) || text.size() > rooms::kMaxMessage)
         return cb(error(400, "text must be 1-10000 characters"));
     std::string err;
     const auto author = http::agent(req, body.get(), "author", err);
@@ -178,7 +187,7 @@ void RoomController::post(const HttpRequestPtr &req, Callback &&cb, int64_t id)
         return cb(error(400, "say who you are: \"author\", or the X-Todo-Agent header"));
     try
     {
-        cb(json(TodoStore::get().post(id, author, text).toJson(), k201Created));
+        cb(json(TodoStore::get().post(id, author, text, attachments).toJson(), k201Created));
     }
     catch (const StoreError &e)
     {

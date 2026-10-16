@@ -1,4 +1,5 @@
 #include "TodoController.h"
+#include "Files.h"
 #include "HttpUtil.h"
 #include "TodoStore.h"
 
@@ -13,8 +14,9 @@ constexpr size_t kMaxTitle = 500;
 constexpr size_t kMaxDescription = 10000;
 
 // Reads optional "priority" ("low"|"medium"|"high"|null), "deadline"
-// ("YYYY-MM-DD"|null) and "description" (text|null) into `patch`; null
-// clears them. Returns an error message, or "" if they're fine.
+// ("YYYY-MM-DD"|null), "description" (text|null) and "attachments" (a list
+// of uploaded files' {"id", "name"?}, which replaces the todo's) into
+// `patch`; null clears them. Returns an error message, or "" if they're fine.
 std::string parseExtras(const Json::Value &body, TodoPatch &patch)
 {
     if (body.isMember("priority"))
@@ -46,6 +48,13 @@ std::string parseExtras(const Json::Value &body, TodoPatch &patch)
     }
     if (!http::parseRef(body, "roomId", patch.roomId))
         return "roomId must be an id or null";
+    if (body.isMember("attachments"))
+    {
+        std::vector<Attachment> list;
+        if (auto msg = files::parseList(body["attachments"], list); !msg.empty())
+            return msg;
+        patch.attachments = std::move(list);
+    }
     return "";
 }
 
@@ -76,7 +85,7 @@ void TodoController::list(const HttpRequestPtr &req, Callback &&cb)
 }
 
 // POST /api/todos  {"title": "...", "categoryId"?: id|null, "roomId"?: id|null,
-//                   "priority"?, "deadline"?, "description"?}
+//                   "priority"?, "deadline"?, "description"?, "attachments"?}
 void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
 {
     auto body = req->getJsonObject();
@@ -100,6 +109,7 @@ void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
     init.deadline = extras.deadline.value_or("");
     init.description = extras.description.value_or("");
     init.roomId = extras.roomId.value_or(0);
+    init.attachments = extras.attachments.value_or(std::vector<Attachment>{});
     try
     {
         cb(json(TodoStore::get().add(title, init, actor(req)).toJson(), k201Created));
@@ -112,7 +122,8 @@ void TodoController::create(const HttpRequestPtr &req, Callback &&cb)
 
 // PATCH /api/todos/{id}  {"title"?: "...", "done"?: bool, "categoryId"?: id|null,
 //                         "priority"?: "low"|"medium"|"high"|null, "deadline"?: "YYYY-MM-DD"|null,
-//                         "description"?: "..."|null, "roomId"?: id|null}
+//                         "description"?: "..."|null, "roomId"?: id|null,
+//                         "attachments"?: [{"id", "name"?}...]|null}
 void TodoController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     auto body = req->getJsonObject();
