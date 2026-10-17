@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files we hand to other apps: camera shots, downloaded attachments to open or share. -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+    <cache-path name="files" path="files/" />
+</paths>

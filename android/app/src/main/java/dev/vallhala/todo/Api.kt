@@ -10,10 +10,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import okio.BufferedSink
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -33,7 +36,21 @@ data class Todo(
     val deadline: String?,
     val description: String?,
     val prunedAt: Long? = null,
+    val attachments: List<Attachment> = emptyList(),
 )
+
+/** An uploaded file on a message or todo; [width] and [height] are 0 when unknown. */
+data class Attachment(
+    val id: String,
+    val name: String,
+    val type: String,
+    val size: Long,
+    val width: Int = 0,
+    val height: Int = 0,
+) {
+    val isImage get() = type.startsWith("image/")
+    val isPdf get() = type == "application/pdf"
+}
 
 data class CatStyle(
     val fg: String? = null,
@@ -78,6 +95,7 @@ data class Message(
     val isEvent: Boolean,
     val todoId: Int?,
     val prunedAt: Long? = null,
+    val attachments: List<Attachment> = emptyList(),
 )
 
 data class ServerTheme(val name: String, val colors: Map<String, String>)
@@ -91,6 +109,22 @@ private fun JSONObject.int(key: String): Int? = if (isNull(key)) null else optIn
 private fun JSONObject.long(key: String): Long? = if (isNull(key)) null else optLong(key)
 private inline fun <T> JSONArray.map(f: (JSONObject) -> T) = List(length()) { f(getJSONObject(it)) }
 
+private fun attachmentOf(o: JSONObject) = Attachment(
+    id = o.optString("id"),
+    name = o.optString("name"),
+    type = o.optString("type"),
+    size = o.optLong("size"),
+    width = o.optInt("width"),
+    height = o.optInt("height"),
+)
+
+private fun attachmentsOf(o: JSONObject) = o.optJSONArray("attachments")?.map(::attachmentOf) ?: emptyList()
+
+/** What the server wants when attaching uploaded files: their ids and names. */
+fun attachmentsJson(list: List<Attachment>) = JSONArray().apply {
+    for (a in list) put(JSONObject().put("id", a.id).put("name", a.name))
+}
+
 private fun todoOf(o: JSONObject) = Todo(
     id = o.getInt("id"),
     title = o.optString("title"),
@@ -103,6 +137,7 @@ private fun todoOf(o: JSONObject) = Todo(
     deadline = o.str("deadline"),
     description = o.str("description"),
     prunedAt = o.long("prunedAt"),
+    attachments = attachmentsOf(o),
 )
 
 private fun styleOf(o: JSONObject?) = o?.let {
@@ -137,6 +172,7 @@ private fun messageOf(o: JSONObject) = Message(
     isEvent = o.optString("kind") == "event",
     todoId = o.int("todoId"),
     prunedAt = o.long("prunedAt"),
+    attachments = attachmentsOf(o),
 )
 
 private fun themeOf(o: JSONObject): ServerTheme {
@@ -167,14 +203,17 @@ class Api(baseUrl: String, private val agent: String) {
     private val base: HttpUrl = baseUrl.trim().trimEnd('/').let { if ("://" in it) it else "http://$it" }
         .toHttpUrlOrNull() ?: throw IllegalArgumentException("Not a valid server address: $baseUrl")
 
-    private fun url(path: String, query: Map<String, String> = emptyMap()): HttpUrl {
+    private fun url(path: String, query: Map<String, String> = emptyMap(), anonymous: Boolean = false): HttpUrl {
         val b = base.newBuilder()
         path.trim('/').split('/').forEach { b.addPathSegment(it) }
         query.forEach { (k, v) -> b.addQueryParameter(k, v) }
         // Headers must be ASCII, so the name always goes in the query too.
-        if (agent.isNotEmpty()) b.addQueryParameter("agent", agent)
+        if (agent.isNotEmpty() && !anonymous) b.addQueryParameter("agent", agent)
         return b.build()
     }
+
+    /** Where an uploaded file can be fetched (no agent: it's the same for everyone, so caches share it). */
+    fun fileUrl(id: String): String = base.newBuilder().addPathSegments("api/files").addPathSegment(id).build().toString()
 
     private suspend fun call(
         method: String,
@@ -182,10 +221,12 @@ class Api(baseUrl: String, private val agent: String) {
         json: JSONObject? = null,
         query: Map<String, String> = emptyMap(),
         client: OkHttpClient = http,
+        anonymous: Boolean = false,
+        raw: RequestBody? = null,
     ): String = withContext(Dispatchers.IO) {
-        val rb = Request.Builder().url(url(path, query))
-        if (agent.isNotEmpty() && agent.all { it.code in 0x20..0x7e }) rb.header("X-Todo-Agent", agent)
-        val payload = json?.toString()?.toRequestBody(JSON)
+        val rb = Request.Builder().url(url(path, query, anonymous))
+        if (!anonymous && agent.isNotEmpty() && agent.all { it.code in 0x20..0x7e }) rb.header("X-Todo-Agent", agent)
+        val payload = raw ?: json?.toString()?.toRequestBody(JSON)
         rb.method(method, payload ?: if (method == "GET" || method == "DELETE") null else "{}".toRequestBody(JSON))
         client.newCall(rb.build()).await().use { res ->
             val text = res.body?.string().orEmpty()
@@ -198,8 +239,8 @@ class Api(baseUrl: String, private val agent: String) {
     }
 
     private suspend fun obj(method: String, path: String, json: JSONObject? = null) = JSONObject(call(method, path, json))
-    private suspend fun arr(path: String, query: Map<String, String> = emptyMap(), client: OkHttpClient = http) =
-        JSONArray(call("GET", path, query = query, client = client))
+    private suspend fun arr(path: String, query: Map<String, String> = emptyMap(), client: OkHttpClient = http, anonymous: Boolean = false) =
+        JSONArray(call("GET", path, query = query, client = client, anonymous = anonymous))
 
     // Todos
     suspend fun todos() = arr("api/todos", mapOf("status" to "all", "archived" to "1")).map(::todoOf)
@@ -231,10 +272,40 @@ class Api(baseUrl: String, private val agent: String) {
     suspend fun addRoom(name: String, topic: String) = roomOf(obj("POST", "api/rooms", body("name" to name, "topic" to topic)))
     suspend fun updateRoom(id: Int, json: JSONObject) = roomOf(obj("PATCH", "api/rooms/$id", json))
     suspend fun deleteRoom(id: Int) { call("DELETE", "api/rooms/$id") }
-    suspend fun post(roomId: Int, text: String) = messageOf(obj("POST", "api/rooms/$roomId/messages", body("text" to text, "author" to agent)))
+    suspend fun post(roomId: Int, text: String, attachments: List<Attachment> = emptyList()): Message {
+        val json = body("text" to text, "author" to agent)
+        if (attachments.isNotEmpty()) json.put("attachments", attachmentsJson(attachments))
+        return messageOf(obj("POST", "api/rooms/$roomId/messages", json))
+    }
 
-    suspend fun messages(roomId: Int, limit: Int = 200) =
-        arr("api/rooms/$roomId/messages", mapOf("limit" to "$limit")).map(::messageOf)
+    /** The newest [limit] messages after [since], oldest first. */
+    suspend fun messages(roomId: Int, limit: Int = 100, since: Long = 0) =
+        arr("api/rooms/$roomId/messages", mapOf("limit" to "$limit", "since" to "$since")).map(::messageOf)
+
+    /** Like [messages], but without saying who we are, so peeking at a room (for the room list) doesn't join it. */
+    suspend fun peek(roomId: Int, limit: Int, since: Long = 0) =
+        arr("api/rooms/$roomId/messages", mapOf("limit" to "$limit", "since" to "$since"), anonymous = true).map(::messageOf)
+
+    // Files
+
+    /** Uploads [file] as [name]; [progress] gets the fraction sent so far. */
+    suspend fun upload(file: File, name: String, progress: (Float) -> Unit = {}): Attachment {
+        val raw = ProgressBody(file, progress)
+        return attachmentOf(JSONObject(call("POST", "api/files", query = mapOf("name" to name), client = uploads, raw = raw)))
+    }
+
+    /** Downloads file [id] to [dest] (via a temporary file, so a half-done one is never left there). */
+    suspend fun download(id: String, dest: File) = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(fileUrl(id)).build()
+        http.newCall(req).await().use { res ->
+            if (!res.isSuccessful) throw ApiException(res.code, "Couldn't fetch the file (${res.code})")
+            dest.parentFile?.mkdirs()
+            val tmp = File(dest.path + ".part")
+            tmp.outputStream().use { out -> res.body!!.byteStream().copyTo(out) }
+            if (!tmp.renameTo(dest)) throw IOException("Couldn't save the file")
+        }
+        dest
+    }
 
     // Pruned messages
     suspend fun pruneMessage(roomId: Int, id: Long) { call("POST", "api/rooms/$roomId/messages/$id/prune") }
@@ -251,11 +322,33 @@ class Api(baseUrl: String, private val agent: String) {
 
     companion object {
         private val JSON = "application/json".toMediaType()
-        private val http = OkHttpClient.Builder()
+        /** Shared with the image loader, so they use one connection pool. */
+        val http: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
         private val longPoll = http.newBuilder().readTimeout(90, TimeUnit.SECONDS).build()
+        private val uploads = http.newBuilder().writeTimeout(120, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
+    }
+}
+
+/** A file as a request body, reporting how much of it has been written. */
+private class ProgressBody(private val file: File, private val progress: (Float) -> Unit) : RequestBody() {
+    override fun contentType() = "application/octet-stream".toMediaType()
+    override fun contentLength() = file.length()
+    override fun writeTo(sink: BufferedSink) {
+        val total = file.length().coerceAtLeast(1)
+        var sent = 0L
+        file.inputStream().use { input ->
+            val buf = ByteArray(32 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                sink.write(buf, 0, n)
+                sent += n
+                progress(sent.toFloat() / total)
+            }
+        }
     }
 }
 

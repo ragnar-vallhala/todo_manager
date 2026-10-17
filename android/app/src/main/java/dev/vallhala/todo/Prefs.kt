@@ -49,12 +49,27 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("collapsed", emptySet())!!.mapNotNull { it.toIntOrNull() }.toSet()
         set(v) = sp.edit().putStringSet("collapsed", v.map { it.toString() }.toSet()).apply()
 
-    /** The last message id read in each room, for the unread dots. */
+    /** The last message seq read in each room, for the unread counts. */
     var lastRead: Map<Int, Long>
         get() = sp.getString("lastRead", null)?.let { s ->
             runCatching { JSONObject(s).let { o -> o.keys().asSequence().associate { it.toInt() to o.getLong(it) } } }.getOrNull()
         } ?: emptyMap()
         set(v) = sp.edit().putString("lastRead", JSONObject(v.mapKeys { it.key.toString() }).toString()).apply()
+
+    /** Rooms pinned to the top of the chat list. */
+    var pinned: Set<Int>
+        get() = sp.getStringSet("pinned", emptySet())!!.mapNotNull { it.toIntOrNull() }.toSet()
+        set(v) = sp.edit().putStringSet("pinned", v.map { it.toString() }.toSet()).apply()
+
+    /** 0 for todos, 1 for chats. */
+    var homeTab: Int
+        get() = sp.getInt("homeTab", 0)
+        set(v) = sp.edit().putInt("homeTab", v).apply()
+
+    /** Whether we've asked for permission to notify about @mentions. */
+    var askedNotify: Boolean
+        get() = sp.getBoolean("askedNotify", false)
+        set(v) = sp.edit().putBoolean("askedNotify", v).apply()
 
     private fun defaultAgent() = Build.MODEL.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifEmpty { "phone" }
 }
