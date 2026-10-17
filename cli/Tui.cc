@@ -2372,7 +2372,8 @@ class App
     }
 
     // What the open_file key shows: in a room, the files of the messages in
-    // view (newest first), else the selected todo's.
+    // view (newest first), then the rest of the room's, so a file scrolled
+    // out of view can still be opened; else the selected todo's.
     std::vector<AttachmentItem> filesInView() const
     {
         if (!isRoomView(catSelId_))
@@ -2380,12 +2381,11 @@ class App
             const TodoItem *t = selected();
             return t ? t->attachments : std::vector<AttachmentItem>{};
         }
-        if (!logFiles_.empty() || wide_)
-            return logFiles_;
-        // No log on screen (a narrow terminal): any of the room's.
-        std::vector<AttachmentItem> all;
+        std::vector<AttachmentItem> all = logFiles_;
         for (auto m = log_.rbegin(); m != log_.rend(); ++m)
-            all.insert(all.end(), m->attachments.begin(), m->attachments.end());
+            for (const auto &a : m->attachments)
+                if (std::none_of(all.begin(), all.end(), [&](const AttachmentItem &b) { return b.id == a.id; }))
+                    all.push_back(a);
         return all;
     }
 
@@ -2394,7 +2394,7 @@ class App
     {
         pickFiles_ = filesInView();
         if (pickFiles_.empty())
-            return flash(isRoomView(catSelId_) ? "No attachments in the messages in view"
+            return flash(isRoomView(catSelId_) ? "No attachments in this room"
                                                : "No attachments on this todo",
                          true);
         if (pickFiles_.size() == 1)
