@@ -1,20 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A check mark in a rounded box, inside the adaptive icon's 66dp safe zone. -->
+<!-- A chat bubble with a check mark, inside the adaptive icon's 66dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#00000000"
-        android:strokeColor="#8EC07C"
-        android:strokeWidth="5"
-        android:pathData="M40,34 L68,34 Q74,34 74,40 L74,68 Q74,74 68,74 L40,74 Q34,74 34,68 L34,40 Q34,34 40,34 Z" />
+        android:fillColor="#1A000000"
+        android:pathData="M42,35 L70,35 Q78,35 78,43 L78,63 Q78,71 70,71 L50,71 L40,79 L41,71 Q34,70 34,63 L34,43 Q34,35 42,35 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M41,33 L69,33 Q77,33 77,41 L77,61 Q77,69 69,69 L49,69 L39,77 L40,69 Q33,68 33,61 L33,41 Q33,33 41,33 Z" />
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#E7E5E0"
+        android:strokeColor="#FF128174"
         android:strokeWidth="6"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M43,54 L51,62 L66,45" />
+        android:pathData="M44,51 L52,59 L67,43" />
 </vector>
