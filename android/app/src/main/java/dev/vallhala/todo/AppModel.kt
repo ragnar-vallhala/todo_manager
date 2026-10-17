@@ -56,12 +56,15 @@ sealed interface Screen {
     data class Chat(val roomId: Int) : Screen
     data class RoomTodos(val roomId: Int) : Screen
     data class RoomPruned(val roomId: Int) : Screen
+    /** A room's media, docs and links. */
+    data class RoomMedia(val roomId: Int) : Screen
     /** Picking a room for files shared from another app. */
     data object Share : Screen
 
     val key: String
         get() = when (this) {
-            is Chat -> "chat$roomId"; is RoomTodos -> "todos$roomId"; is RoomPruned -> "pruned$roomId"; Share -> "share"
+            is Chat -> "chat$roomId"; is RoomTodos -> "todos$roomId"; is RoomPruned -> "pruned$roomId"
+            is RoomMedia -> "media$roomId"; Share -> "share"
         }
 }
 
@@ -72,6 +75,17 @@ data class Preview(val last: Message?, val unread: Int, val mentioned: Boolean)
 data class GalleryItem(val attachment: Attachment, val author: String? = null, val time: Long? = null)
 
 data class Gallery(val items: List<GalleryItem>, val start: Int)
+
+/** A link someone posted in a room. */
+data class LinkItem(val url: String, val author: String, val createdAt: Long, val messageId: Long)
+
+/** Everything a room's gallery shows: its files (all of them, loaded page by page) and, once asked for, its links. */
+class RoomMediaState(val roomId: Int) {
+    var files by mutableStateOf<List<RoomFile>>(emptyList())
+    var filesDone by mutableStateOf(false)
+    var links by mutableStateOf<List<LinkItem>?>(null)
+    var linksLoading by mutableStateOf(false)
+}
 
 /** A message on its way: its files uploading, then the post. Shown in the log until the server has it. */
 class Outgoing(val key: Long, val roomId: Int, val text: String, val drafts: List<Draft>, val createdAt: Long) {
@@ -150,6 +164,8 @@ class AppModel(app: Application) : AndroidViewModel(app) {
     var shared by mutableStateOf<List<Draft>>(emptyList()); private set
     /** The attachment being fetched to open, share or save. */
     var fetching by mutableStateOf<String?>(null); private set
+    /** The open room gallery's contents. */
+    var roomMedia by mutableStateOf<RoomMediaState?>(null); private set
     /** The todo whose new attachments are uploading. */
     var todoUploading by mutableStateOf<Int?>(null); private set
 
@@ -176,7 +192,10 @@ class AppModel(app: Application) : AndroidViewModel(app) {
             val v = view
             if ((v is View.Cat && cats.none { it.id == v.id }) || (v is View.RoomView && rooms.none { it.id == v.id })) go(View.All)
             stack.removeAll { s ->
-                val id = when (s) { is Screen.Chat -> s.roomId; is Screen.RoomTodos -> s.roomId; is Screen.RoomPruned -> s.roomId; else -> null }
+                val id = when (s) {
+                    is Screen.Chat -> s.roomId; is Screen.RoomTodos -> s.roomId; is Screen.RoomPruned -> s.roomId
+                    is Screen.RoomMedia -> s.roomId; else -> null
+                }
                 id != null && rooms.none { it.id == id }
             }
             syncPoll()
@@ -345,7 +364,7 @@ class AppModel(app: Application) : AndroidViewModel(app) {
     fun openChat(id: Int) {
         Notify.clear(ctx, id)
         // From a notification or a share: whatever was open gives way to the room.
-        if (chatRoom != id) stack.removeAll { it is Screen.Chat || it is Screen.RoomTodos || it is Screen.RoomPruned }
+        if (chatRoom != id) stack.removeAll { it is Screen.Chat || it is Screen.RoomTodos || it is Screen.RoomPruned || it is Screen.RoomMedia }
         if (stack.lastOrNull() != Screen.Chat(id)) stack += Screen.Chat(id)
         syncPoll()
     }
@@ -730,22 +749,76 @@ class AppModel(app: Application) : AndroidViewModel(app) {
         return fresh.any { it.isEvent }
     }
 
-    /** Fetches more of the open room's history (the server only gives the newest N, so N grows). */
+    /** Fetches the page of the open room's history before what's loaded. */
     fun loadOlder() {
         val id = logRoom ?: return
         if (!hasOlder || loadingOlder) return
+        val first = log.firstOrNull()?.seq ?: return
         loadingOlder = true
         launch(quiet = true) {
             try {
-                val limit = (logLimit * 3).coerceAtMost(MAX_LIMIT)
-                val msgs = api.messages(id, limit)
+                val msgs = api.messages(id, PAGE, before = first)
                 if (logRoom == id) {
-                    logLimit = limit
+                    val had = log.size
                     addMessages(msgs)
-                    hasOlder = msgs.size >= limit && limit < MAX_LIMIT
+                    // A server without `before` sends the newest again: nothing new, so stop.
+                    hasOlder = msgs.size >= PAGE && log.size > had
                 }
             } finally {
                 loadingOlder = false
+            }
+        }
+    }
+
+    // ── A room's gallery ──
+
+    fun openMedia(roomId: Int) {
+        push(Screen.RoomMedia(roomId))
+        if (roomMedia?.roomId == roomId && roomMedia?.filesDone == true) return
+        val st = RoomMediaState(roomId)
+        roomMedia = st
+        launch(quiet = true) {
+            // Every file in the room, newest first, a page at a time.
+            var before = 0L
+            val all = ArrayList<RoomFile>()
+            while (roomMedia === st) {
+                val page = api.roomFiles(roomId, before, FILES_PAGE)
+                all += page
+                st.files = all.toList()
+                if (page.size < FILES_PAGE) break
+                before = page.last().seq
+            }
+            st.filesDone = true
+        }
+    }
+
+    /** Finds every link posted in the gallery's room (reading its whole history, a page at a time). */
+    fun loadLinks() {
+        val st = roomMedia ?: return
+        if (st.links != null || st.linksLoading) return
+        st.linksLoading = true
+        launch(quiet = true) {
+            try {
+                val found = ArrayList<LinkItem>()
+                var before = 0L
+                while (roomMedia === st) {
+                    val page = if (before == 0L) api.messages(st.roomId, MAX_LIMIT) else api.messages(st.roomId, MAX_LIMIT, before = before)
+                    for (m in page.asReversed()) {
+                        if (m.isEvent) continue
+                        for (u in URL_RE.findAll(m.text)) {
+                            val url = u.value.trimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"')
+                            found += LinkItem(if (url.startsWith("www.", true)) "https://$url" else url, m.author, m.createdAt, m.id)
+                        }
+                    }
+                    st.links = found.toList()
+                    val oldest = page.firstOrNull()?.seq ?: break
+                    // A full page may have more before it; one without `before` support repeats itself.
+                    if (page.size < MAX_LIMIT || oldest == before) break
+                    before = oldest
+                }
+                if (st.links == null) st.links = emptyList()
+            } finally {
+                st.linksLoading = false
             }
         }
     }
@@ -811,6 +884,8 @@ class AppModel(app: Application) : AndroidViewModel(app) {
         /** Seconds a live update waits on the server: short enough to notice a dead connection soon. */
         private const val WAIT = 25
         private const val TICK = 5000L
+        private const val FILES_PAGE = 500
+        private val URL_RE = Regex("""(?i)\b(?:https?://|www\.)[^\s<>"']+""")
 
         /** Higher priority first, then earlier deadline (none last), then oldest first. */
         val listOrder = Comparator<Todo> { a, b ->

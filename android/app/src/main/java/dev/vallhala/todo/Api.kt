@@ -47,10 +47,18 @@ data class Attachment(
     val size: Long,
     val width: Int = 0,
     val height: Int = 0,
+    /** Seconds, for videos whose headers say; else 0. */
+    val duration: Double = 0.0,
 ) {
     val isImage get() = type.startsWith("image/")
+    val isVideo get() = type.startsWith("video/")
+    /** Shown as a picture: images, and videos by a frame. */
+    val isMedia get() = isImage || isVideo
     val isPdf get() = type == "application/pdf"
 }
+
+/** An attachment in a room's log, with the message it's on. */
+data class RoomFile(val attachment: Attachment, val messageId: Long, val seq: Long, val author: String, val createdAt: Long)
 
 data class CatStyle(
     val fg: String? = null,
@@ -116,6 +124,7 @@ private fun attachmentOf(o: JSONObject) = Attachment(
     size = o.optLong("size"),
     width = o.optInt("width"),
     height = o.optInt("height"),
+    duration = o.optDouble("duration", 0.0).takeIf { !it.isNaN() } ?: 0.0,
 )
 
 private fun attachmentsOf(o: JSONObject) = o.optJSONArray("attachments")?.map(::attachmentOf) ?: emptyList()
@@ -166,7 +175,7 @@ private fun messageOf(o: JSONObject) = Message(
     id = o.getLong("id"),
     seq = o.optLong("seq", o.getLong("id")),
     roomId = o.optInt("roomId"),
-    author = o.optString("author"),
+    author = o.str("author").orEmpty(),
     text = o.optString("text"),
     createdAt = o.optLong("createdAt"),
     isEvent = o.optString("kind") == "event",
@@ -278,9 +287,20 @@ class Api(baseUrl: String, private val agent: String) {
         return messageOf(obj("POST", "api/rooms/$roomId/messages", json))
     }
 
-    /** The newest [limit] messages after [since], oldest first. */
-    suspend fun messages(roomId: Int, limit: Int = 100, since: Long = 0) =
-        arr("api/rooms/$roomId/messages", mapOf("limit" to "$limit", "since" to "$since")).map(::messageOf)
+    /** The newest [limit] messages after [since] (and before seq [before], if set), oldest first. */
+    suspend fun messages(roomId: Int, limit: Int = 100, since: Long = 0, before: Long = 0) =
+        arr(
+            "api/rooms/$roomId/messages",
+            mapOf("limit" to "$limit", "since" to "$since") + if (before > 0) mapOf("before" to "$before") else emptyMap(),
+        ).map(::messageOf)
+
+    /** Room [roomId]'s attachments, newest first, from messages before seq [before] (0: the newest). */
+    suspend fun roomFiles(roomId: Int, before: Long = 0, limit: Int = 500) =
+        arr(
+            "api/rooms/$roomId/files",
+            mapOf("limit" to "$limit") + if (before > 0) mapOf("before" to "$before") else emptyMap(),
+            anonymous = true,
+        ).map { RoomFile(attachmentOf(it), it.optLong("messageId"), it.optLong("seq"), it.str("author").orEmpty(), it.optLong("createdAt")) }
 
     /** Like [messages], but without saying who we are, so peeking at a room (for the room list) doesn't join it. */
     suspend fun peek(roomId: Int, limit: Int, since: Long = 0) =

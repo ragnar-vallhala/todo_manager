@@ -239,7 +239,7 @@ fun SharePicker(model: AppModel) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(model.shared, key = { it.file.path }) { d ->
-                        if (d.isImage) Thumb(d.file, Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)), d.name)
+                        if (d.isMedia) MediaThumb(Pic(d.file, d.width, d.height, d.name, d.isVideo, d.duration), Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)), small = true)
                         else Surface(Modifier.size(72.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                             Column(Modifier.padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                                 Icon(Icons.Default.PictureAsPdf, null, tint = Color(0xFFE5483A))

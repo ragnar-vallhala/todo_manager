@@ -38,7 +38,13 @@ object Notify {
             .putExtra(EXTRA_ROOM, room.id)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val pi = PendingIntent.getActivity(ctx, room.id, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val text = m.text.ifBlank { if (m.attachments.any { it.isImage }) "📷 Photo" else "📄 File" }
+        val text = m.text.ifBlank {
+            when {
+                m.attachments.any { it.isVideo } -> "🎥 Video"
+                m.attachments.any { it.isImage } -> "📷 Photo"
+                else -> "📄 File"
+            }
+        }
         val n = NotificationCompat.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle("${m.author} in ${room.name}")

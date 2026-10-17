@@ -22,6 +22,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import dev.vallhala.todo.durationLabel
 
 /** A round avatar with the name's initials, in the name's own color. */
 @Composable
@@ -84,8 +87,33 @@ fun Thumb(data: Any, modifier: Modifier = Modifier, contentDescription: String? 
     }
 }
 
-/** One image to lay out: what to load, and its size in pixels if known (0 if not). */
-data class Pic(val data: Any, val width: Int, val height: Int, val name: String)
+/** One image (or video, shown by a frame) to lay out: what to load, and its size in pixels if known (0 if not). */
+data class Pic(val data: Any, val width: Int, val height: Int, val name: String, val video: Boolean = false, val duration: Double = 0.0)
+
+/** A picture's thumbnail; a video's has a play button and its length on it. */
+@Composable
+fun MediaThumb(p: Pic, modifier: Modifier = Modifier, small: Boolean = false) {
+    Box(modifier) {
+        Thumb(p.data, Modifier.fillMaxSize(), p.name)
+        if (p.video) {
+            Box(
+                Modifier.align(Alignment.Center).size(if (small) 28.dp else 46.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Default.PlayArrow, "Video", Modifier.size(if (small) 18.dp else 30.dp), tint = Color.White)
+            }
+            if (p.duration > 0) Row(
+                Modifier.align(Alignment.BottomStart).padding(5.dp).clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.5f)).padding(horizontal = 5.dp, vertical = 1.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Videocam, null, Modifier.size(12.dp), tint = Color.White)
+                Spacer(Modifier.width(3.dp))
+                Text(durationLabel(p.duration), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
 
 /**
  * Images as in a chat: one at its own aspect ratio (within reason, so the
@@ -106,7 +134,7 @@ fun ImageGrid(
         if (pics.size == 1) {
             val p = pics[0]
             val ratio = if (p.width > 0 && p.height > 0) (p.width.toFloat() / p.height).coerceIn(0.62f, 1.9f) else 4f / 3f
-            Thumb(p.data, Modifier.fillMaxWidth().aspectRatio(ratio).tap({ onClick(0) }, onLongClick), p.name)
+            MediaThumb(p, Modifier.fillMaxWidth().aspectRatio(ratio).tap({ onClick(0) }, onLongClick))
         } else {
             val shown = pics.take(4)
             val gap = 3.dp
@@ -117,7 +145,7 @@ fun ImageGrid(
                             // A lone third image takes the whole row.
                             val w = if (row.size == 1) width else (width - gap) / 2
                             Box(Modifier.width(w).aspectRatio(if (row.size == 1) 2f else 1f)) {
-                                Thumb(shown[i].data, Modifier.fillMaxSize().tap({ onClick(i) }, onLongClick), shown[i].name)
+                                MediaThumb(shown[i], Modifier.fillMaxSize().tap({ onClick(i) }, onLongClick), small = true)
                                 if (i == 3 && pics.size > 4) {
                                     Box(
                                         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)).tap({ onClick(i) }, onLongClick),

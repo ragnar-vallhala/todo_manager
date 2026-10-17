@@ -60,6 +60,23 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import android.view.WindowManager
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import android.view.LayoutInflater
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import dev.vallhala.todo.R
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -71,7 +88,10 @@ import coil3.request.ImageRequest
 import dev.vallhala.todo.AppModel
 import dev.vallhala.todo.Gallery
 
-/** Images full screen: swipe between them, pinch or double-tap to zoom, save to the gallery or share. */
+/**
+ * Images and videos full screen: swipe between them, pinch or double-tap to
+ * zoom an image, play a video (streamed), save to the gallery or share.
+ */
 @Composable
 fun ImageViewer(model: AppModel, g: Gallery) {
     val items = g.items
@@ -97,8 +117,10 @@ fun ImageViewer(model: AppModel, g: Gallery) {
                 key = { "${items[it].attachment.id}/$it" },
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
-                ZoomableImage(
-                    model.fileUrl(items[page].attachment.id),
+                val a = items[page].attachment
+                if (a.isVideo) VideoPage(model.fileUrl(a.id), active = page == pager.currentPage, poster = Pic(model.fileUrl(a.id), a.width, a.height, a.name, true, a.duration))
+                else ZoomableImage(
+                    model.fileUrl(a.id),
                     onTap = { chrome = !chrome },
                     onZoom = { zoomed[page] = it },
                 )
@@ -121,8 +143,12 @@ fun ImageViewer(model: AppModel, g: Gallery) {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        current?.time?.let {
-                            Text("${dayLabel(localDate(it))}, ${clock(it)}", color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+                        val parts = listOfNotNull(
+                            current?.time?.let { "${dayLabel(localDate(it))}, ${clock(it)}" },
+                            if (items.size > 1) "${pager.currentPage + 1} of ${items.size}" else null,
+                        )
+                        if (parts.isNotEmpty()) {
+                            Text(parts.joinToString(" · "), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
                         }
                     }
                     if (model.fetching != null) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
@@ -134,17 +160,6 @@ fun ImageViewer(model: AppModel, g: Gallery) {
                 }
             }
 
-            if (items.size > 1) AnimatedVisibility(chrome, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
-                Box(
-                    Modifier.fillMaxWidth()
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))))
-                        .windowInsetsPadding(WindowInsets.navigationBars)
-                        .padding(16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("${pager.currentPage + 1} of ${items.size}", color = Color.White, style = MaterialTheme.typography.labelLarge)
-                }
-            }
         }
     }
 }
@@ -223,8 +238,9 @@ private fun ZoomableImage(url: String, onTap: () -> Unit, onZoom: (Boolean) -> U
                 is AsyncImagePainter.State.Loading, AsyncImagePainter.State.Empty -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Color.White)
                 }
-                is AsyncImagePainter.State.Error -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Couldn't load the image", color = Color.White)
+                is AsyncImagePainter.State.Error -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Icon(Icons.Default.BrokenImage, null, Modifier.size(48.dp), tint = Color.White.copy(alpha = 0.7f))
+                    Text("Couldn't show this image", color = Color.White)
                 }
                 else -> SubcomposeAsyncImageContent()
             }
@@ -253,6 +269,75 @@ private fun FullScreenWindow() {
         WindowCompat.getInsetsController(w, view).apply {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
+        }
+    }
+}
+
+/**
+ * A video, streamed: a player while its page is the one showing (it stops
+ * and lets go when swiped away or when the app goes to the background),
+ * else its first frame. The frame also shows until the video's own first
+ * frame is drawn, with a spinner while it buffers, so it's never just black.
+ */
+@Composable
+private fun VideoPage(url: String, active: Boolean, poster: Pic) {
+    val ratio = if (poster.width > 0 && poster.height > 0) poster.width.toFloat() / poster.height else 16f / 9
+    val posterView: @Composable () -> Unit = {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            MediaThumb(poster.copy(video = !active), Modifier.fillMaxWidth().aspectRatio(ratio))
+        }
+    }
+    if (!active) return posterView()
+    val ctx = LocalContext.current
+    var shown by remember(url) { mutableStateOf(false) }
+    var buffering by remember(url) { mutableStateOf(true) }
+    var failed by remember(url) { mutableStateOf<String?>(null) }
+    val player = remember(url) {
+        ExoPlayer.Builder(ctx).build().apply {
+            setMediaItem(MediaItem.fromUri(url))
+            prepare()
+            playWhenReady = true
+        }
+    }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(player, lifecycle) {
+        val listen = object : Player.Listener {
+            override fun onRenderedFirstFrame() { shown = true }
+            override fun onPlaybackStateChanged(state: Int) { buffering = state == Player.STATE_BUFFERING || state == Player.STATE_IDLE }
+            override fun onPlayerError(error: PlaybackException) { failed = error.errorCodeName }
+        }
+        player.addListener(listen)
+        val watch = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_STOP) player.pause() }
+        lifecycle.addObserver(watch)
+        onDispose {
+            lifecycle.removeObserver(watch)
+            player.removeListener(listen)
+            player.release()
+        }
+    }
+    Box(Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { c ->
+                (LayoutInflater.from(c).inflate(R.layout.player_view, null) as PlayerView).apply {
+                    this.player = player
+                    // Above the navigation bar.
+                    ViewCompat.setOnApplyWindowInsetsListener(this) { v, insets ->
+                        v.setPadding(0, 0, 0, insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom)
+                        insets
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (!shown) Box(Modifier.fillMaxSize()) {
+            posterView()
+            Box(Modifier.align(Alignment.Center)) {
+                when {
+                    failed != null -> Text("Can't play this video ($failed)", color = Color.White,
+                        modifier = Modifier.background(Color.Black.copy(alpha = 0.6f)).padding(12.dp))
+                    buffering -> CircularProgressIndicator(color = Color.White)
+                }
+            }
         }
     }
 }

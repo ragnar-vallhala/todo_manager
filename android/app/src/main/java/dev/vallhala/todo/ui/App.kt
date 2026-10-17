@@ -192,6 +192,7 @@ fun App(model: AppModel) {
                     is Screen.Chat -> model.room(s.roomId)?.let { ChatScreen(model, it, open) { id -> openTodo = id } }
                     is Screen.RoomTodos -> RoomTodosScreen(model, s.roomId, onOpen)
                     is Screen.RoomPruned -> model.room(s.roomId)?.let { PrunedMessagesScreen(model, it, open) }
+                    is Screen.RoomMedia -> model.room(s.roomId)?.let { RoomMediaScreen(model, it) }
                     Screen.Share -> SharePicker(model)
                 }
             }

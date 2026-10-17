@@ -12,8 +12,8 @@ android {
         applicationId = "dev.vallhala.todo"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {
@@ -53,5 +53,11 @@ dependencies {
     // Images in rooms and todos, cached on disk.
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
+    // Animated GIF / WebP, and a video's first frame for its thumbnail.
+    implementation("io.coil-kt.coil3:coil-gif:3.3.0")
+    implementation("io.coil-kt.coil3:coil-video:3.3.0")
+    // Playing videos, streamed from the server.
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-ui:1.8.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

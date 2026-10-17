@@ -667,8 +667,8 @@ private fun Section(label: String) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TodoFiles(model: AppModel, t: Todo) {
-    val images = t.attachments.filter { it.isImage }
-    val files = t.attachments.filter { !it.isImage }
+    val images = t.attachments.filter { it.isMedia }
+    val files = t.attachments.filter { !it.isMedia }
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(AppModel.MAX_FILES)) { model.attachToTodo(t, it) }
     val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { model.attachToTodo(t, it) }
     var remove by remember { mutableStateOf(false) }
@@ -678,19 +678,23 @@ private fun TodoFiles(model: AppModel, t: Todo) {
             Spacer(Modifier.weight(1f))
             if (model.todoUploading == t.id) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             if (t.attachments.isNotEmpty()) TextButton(onClick = { remove = !remove }) { Text(if (remove) "Done" else "Edit") }
-            IconButton(onClick = { pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
-                Icon(Icons.Default.PhotoLibrary, "Attach images")
+            IconButton(onClick = { pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }) {
+                Icon(Icons.Default.PhotoLibrary, "Attach photos or videos")
             }
             IconButton(onClick = { pickPdf.launch(arrayOf("application/pdf")) }) { Icon(Icons.Default.PictureAsPdf, "Attach a PDF") }
         }
         if (t.attachments.isEmpty()) {
-            Text("No files. Attach images or PDFs to keep them with the todo.", style = MaterialTheme.typography.bodySmall, color = LocalExtra.current.muted)
+            Text("No files. Attach photos, videos or PDFs to keep them with the todo.", style = MaterialTheme.typography.bodySmall, color = LocalExtra.current.muted)
         }
         if (images.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val gallery = images.map { GalleryItem(it) }
             images.forEachIndexed { i, a ->
                 Box(Modifier.size(96.dp)) {
-                    Thumb(model.fileUrl(a.id), Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).clickable { model.showImages(gallery, i) }, a.name)
+                    MediaThumb(
+                        Pic(model.fileUrl(a.id), a.width, a.height, a.name, a.isVideo, a.duration),
+                        Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).clickable { model.showImages(gallery, i) },
+                        small = true,
+                    )
                     if (remove) RemoveBadge(Modifier.align(Alignment.TopEnd)) { model.removeTodoAttachment(t, a) }
                 }
             }

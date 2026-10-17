@@ -72,6 +72,7 @@ import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.TaskAlt
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -187,9 +188,9 @@ private fun lines(log: List<Message>, sending: List<Outgoing>, me: String, unrea
     return out
 }
 
-/** Every image in the log, oldest first, for the viewer to swipe through. */
+/** Every image and video in the log, oldest first, for the viewer to swipe through. */
 private fun galleryOf(log: List<Message>) = log.flatMap { m ->
-    m.attachments.filter { it.isImage }.map { GalleryItem(it, m.author, m.createdAt) }
+    m.attachments.filter { it.isMedia }.map { GalleryItem(it, m.author, m.createdAt) }
 }
 
 // ── The screen ──
@@ -255,6 +256,7 @@ private fun ChatTopBar(model: AppModel, room: Room, onInfo: () -> Unit, open: (A
             IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
             DropdownMenu(menu, { menu = false }) {
                 DropdownMenuItem({ Text("Room info") }, { menu = false; onInfo() })
+                DropdownMenuItem({ Text("Media, links and docs") }, { menu = false; model.openMedia(room.id) })
                 DropdownMenuItem({ Text("Edit room") }, { menu = false; open(AppDialog.EditRoom(room.id)) })
                 DropdownMenuItem({ Text(if (room.id in model.pinned) "Unpin" else "Pin to top") }, { menu = false; model.togglePin(room.id) })
                 DropdownMenuItem({ Text("Pruned messages" + if (room.prunedMessages > 0) " (${room.prunedMessages})" else "") }, {
@@ -302,6 +304,7 @@ private fun RoomInfoSheet(model: AppModel, room: Room, onDismiss: () -> Unit, op
                     Row(Modifier.padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { onDismiss(); open(AppDialog.EditRoom(room.id)) }) { Text("Edit") }
                         TextButton(onClick = { onDismiss(); model.push(Screen.RoomTodos(room.id)) }) { Text("Todos") }
+                        TextButton(onClick = { onDismiss(); model.openMedia(room.id) }) { Text("Media") }
                         TextButton(onClick = { onDismiss(); model.push(Screen.RoomPruned(room.id)) }) { Text("Pruned") }
                     }
                 }
@@ -447,7 +450,6 @@ private fun MessageList(model: AppModel, room: Room, onOpenTodo: (Int) -> Unit) 
                     when {
                         model.loadingOlder -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                         model.hasOlder -> {}
-                        model.log.size >= 1000 -> Pill("Older messages can't be loaded here")
                         else -> Pill(if (room.topic.isNotBlank()) room.topic else "This is the start of ${room.name}")
                     }
                 }
@@ -685,8 +687,8 @@ private fun MessageBubble(
     var menu by remember { mutableStateOf(false) }
     val onBubble = if (mine) extra.onMine else extra.onOther
     val metaColor = onBubble.copy(alpha = 0.62f)
-    val images = m.attachments.filter { it.isImage }
-    val files = m.attachments.filter { !it.isImage }
+    val images = m.attachments.filter { it.isMedia }
+    val files = m.attachments.filter { !it.isMedia }
     val todoIds = model.todos.mapTo(HashSet()) { it.id }
     val linkColor = if (mine) extra.onMine else MaterialTheme.colorScheme.primary
     val text = remember(m.text, model.agent, todoIds.size, linkColor) {
@@ -733,7 +735,7 @@ private fun MessageBubble(
             }
             if (images.isNotEmpty()) {
                 BubbleImages(
-                    images.map { Pic(model.fileUrl(it.id), it.width, it.height, it.name) },
+                    images.map { Pic(model.fileUrl(it.id), it.width, it.height, it.name, it.isVideo, it.duration) },
                     width = imgWidth,
                     corner = 11.dp,
                     onClick = { i ->
@@ -775,8 +777,8 @@ private fun MessageBubble(
 private fun SendingBubble(model: AppModel, o: Outgoing, first: Boolean, maxBubble: Dp, clock: (Long) -> String) {
     val extra = LocalExtra.current
     var menu by remember { mutableStateOf(false) }
-    val images = o.drafts.filter { it.isImage }
-    val files = o.drafts.filter { !it.isImage }
+    val images = o.drafts.filter { it.isMedia }
+    val files = o.drafts.filter { !it.isMedia }
     val failed = o.failed
     val status = if (failed != null) Status.Failed else Status.Sending
     val metaColor = extra.onMine.copy(alpha = 0.62f)
@@ -798,7 +800,7 @@ private fun SendingBubble(model: AppModel, o: Outgoing, first: Boolean, maxBubbl
         Column(if (images.isNotEmpty()) Modifier.width(imgWidth + 8.dp) else Modifier) {
             if (images.isNotEmpty()) {
                 BubbleImages(
-                    images.map { Pic(it.file, it.width, it.height, it.name) },
+                    images.map { Pic(it.file, it.width, it.height, it.name, it.isVideo, it.duration) },
                     width = imgWidth,
                     corner = 11.dp,
                     onClick = { if (failed != null) menu = true },
@@ -906,11 +908,16 @@ private fun Composer(model: AppModel, room: Room) {
         if (ok && f != null && f.length() > 0) model.addDrafts(room.id, listOf(Uri.fromFile(f)), fromCamera = true)
         f?.let { file -> if (!ok) file.delete() }
     }
-    fun camera() {
-        val (f, uri) = Media.cameraTarget(ctx)
+    val takeVideo = rememberLauncherForActivityResult(ActivityResultContracts.CaptureVideo()) { ok ->
+        val f = cameraFile?.let { java.io.File(it) }
+        // Some camera apps report failure but leave the clip; go by what's there.
+        if (f != null && f.length() > 0) model.addDrafts(room.id, listOf(Uri.fromFile(f))) else f?.delete()
+    }
+    fun camera(video: Boolean = false) {
+        val (f, uri) = Media.cameraTarget(ctx, video)
         cameraFile = f.path
         try {
-            takePhoto.launch(uri)
+            if (video) takeVideo.launch(uri) else takePhoto.launch(uri)
         } catch (e: android.content.ActivityNotFoundException) {
             model.notice("No camera app here")
         }
@@ -971,9 +978,10 @@ private fun Composer(model: AppModel, room: Room) {
                 Row(Modifier.padding(vertical = 16.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                     AttachOption(Icons.Default.PhotoLibrary, "Gallery", Color(0xFF8E5BD8)) {
                         attach = false
-                        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                     }
                     AttachOption(Icons.Default.PhotoCamera, "Camera", Color(0xFFD9467A)) { attach = false; camera() }
+                    AttachOption(Icons.Default.Videocam, "Video", Color(0xFFE07A2E)) { attach = false; camera(video = true) }
                     AttachOption(Icons.Default.PictureAsPdf, "PDF", Color(0xFF5468D8)) { attach = false; pickPdf.launch(arrayOf("application/pdf")) }
                 }
             }
@@ -1018,7 +1026,7 @@ private fun Composer(model: AppModel, room: Room) {
                         Icon(Icons.Default.AttachFile, "Attach", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     AnimatedVisibility(value.text.isEmpty() && drafts.isEmpty(), enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
-                        IconButton(onClick = ::camera) {
+                        IconButton(onClick = { camera() }) {
                             Icon(Icons.Default.PhotoCamera, "Take a photo", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -1066,8 +1074,8 @@ private fun DraftTray(model: AppModel, roomId: Int, drafts: List<Draft>, onAdd: 
     ) {
         items(drafts, key = { it.file.path }) { d ->
             Box(Modifier.size(84.dp)) {
-                if (d.isImage) {
-                    Thumb(d.file, Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)), d.name)
+                if (d.isMedia) {
+                    MediaThumb(Pic(d.file, d.width, d.height, d.name, d.isVideo, d.duration), Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)), small = true)
                 } else {
                     Surface(Modifier.fillMaxSize(), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                         Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -1168,11 +1176,14 @@ fun PrunedMessagesScreen(model: AppModel, room: Room, open: (AppDialog) -> Unit)
     }
 }
 
-/** "📷 Photo", "📷 3 photos", "📄 notes.pdf". */
+/** "📷 Photo", "📷 3 photos", "🎥 Video", "📄 notes.pdf". */
 fun attachmentSummary(list: List<Attachment>): String {
     val images = list.count { it.isImage }
-    val files = list.filter { !it.isImage }
+    val videos = list.count { it.isVideo }
+    val files = list.filter { !it.isMedia }
     return when {
+        videos == 1 && images == 0 && files.isEmpty() -> "🎥 Video" + (list.first { it.isVideo }.duration.takeIf { it > 0 }?.let { " (${dev.vallhala.todo.durationLabel(it)})" } ?: "")
+        videos > 1 && images == 0 && files.isEmpty() -> "🎥 $videos videos"
         images == 1 && files.isEmpty() -> "📷 Photo"
         images > 1 && files.isEmpty() -> "📷 $images photos"
         images == 0 && files.size == 1 -> "📄 ${files[0].name}"
