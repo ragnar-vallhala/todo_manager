@@ -1299,10 +1299,12 @@ function messageRow(m, tools) {
   return li;
 }
 
-// ── Attachments: images and PDFs on messages and todos ──
+// ── Attachments: images, PDFs and videos on messages and todos ──
 
-const FILE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf'];
-const MAX_FILE = 10 * 1024 * 1024;  // the server's limit
+const FILE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'video/mp4', 'video/webm'];
+const MAX_FILE = 10 * 1024 * 1024;   // the server's limit for images and PDFs
+const MAX_VIDEO = 50 * 1024 * 1024;  // and for videos
+const isVideo = (file) => file.type.startsWith('video/') || /\.(mp4|m4v|webm)$/i.test(file.name || '');
 let pendingFiles = [];   // for the message being written: uploaded ones, and { name, uploading: true }
 let pendingRoom = null;  // the room they're for
 
@@ -1314,10 +1316,17 @@ function sizeLabel(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-// Thumbnails for images (click: the full image, in a new tab) and a link
-// for other files.
+// Thumbnails for images (click: the full image, in a new tab), a player for
+// videos, and a link for other files.
 function attachmentList(list) {
   return el('div', { className: 'attachments' }, ...list.map((a) => {
+    if (a.type.startsWith('video/')) {
+      // Only the start is fetched until it's played; the server serves ranges, so it seeks.
+      const video = el('video', { src: fileUrl(a), controls: true, preload: 'metadata', playsInline: true,
+        title: `${a.name} · ${a.width ? `${a.width}×${a.height} · ` : ''}${sizeLabel(a.size)}` });
+      if (a.width && a.height) Object.assign(video, { width: a.width, height: a.height });
+      return el('div', { className: 'video' }, video);
+    }
     // Not draggable, so dragging a todo by its thumbnail still moves the todo.
     const link = el('a', { href: fileUrl(a), target: '_blank', rel: 'noopener', draggable: false,
       title: `${a.name} · ${a.width ? `${a.width}×${a.height} · ` : ''}${sizeLabel(a.size)}` });
@@ -1341,12 +1350,12 @@ function addFiles(files) {
   if (id == null) return;
   for (const file of files) {
     const name = file.name || 'pasted.png';
-    if (!FILE_TYPES.includes(file.type) && !/\.(png|jpe?g|gif|webp|pdf)$/i.test(name)) {
-      showError(new Error(`${name} isn't an image (PNG, JPEG, GIF, WebP) or a PDF.`));
+    if (!FILE_TYPES.includes(file.type) && !/\.(png|jpe?g|gif|webp|pdf|mp4|m4v|webm)$/i.test(name)) {
+      showError(new Error(`${name} isn't an image (PNG, JPEG, GIF, WebP), a PDF or a video (MP4, WebM).`));
       continue;
     }
-    if (file.size > MAX_FILE) {
-      showError(new Error(`${name} is over 10 MB, the most the server takes.`));
+    if (file.size > (isVideo(file) ? MAX_VIDEO : MAX_FILE)) {
+      showError(new Error(`${name} is over ${isVideo(file) ? 50 : 10} MB, the most the server takes.`));
       continue;
     }
     const item = { name, uploading: true };

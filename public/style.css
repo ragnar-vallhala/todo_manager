@@ -803,6 +803,18 @@ dialog .keep-row input.keep { width: 5.5em; margin: 0; }
   max-height: 180px;
 }
 .attachments .thumb:hover { border-color: var(--muted); }
+.attachments .video { line-height: 0; max-width: 100%; }
+.attachments .video video {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(360px, 100%);
+  max-height: 270px;
+  border: 1px solid var(--faint);
+  border-radius: 8px;
+  background: #000;
+}
+.item .attachments .video video { max-width: min(240px, 100%); max-height: 180px; }
 .file-chip {
   display: inline-flex;
   align-items: baseline;
