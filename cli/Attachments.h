@@ -16,24 +16,34 @@ struct AttachmentItem
 {
     std::string id;  // shown as "f" + id
     std::string name;
-    std::string type;  // "image/png", ..., "application/pdf"
+    std::string type;  // "image/png", ..., "application/pdf", "video/mp4", "video/webm"
     int64_t size{0};
     int width{0}, height{0};  // 0 when unknown
+    double duration{0};       // seconds, videos only; 0 when unknown
 
     bool image() const { return type.rfind("image/", 0) == 0; }
+    bool video() const { return type.rfind("video/", 0) == 0; }
     std::string label() const { return "f" + id; }
 
-    // "[image: shot.png 800x600, f1a2b3c4d5e6]" or "[file: notes.pdf, f...]".
+    // "[image: shot.png 800x600, f1a2b3c4d5e6]", "[video: run.mp4 1280x720 0:42, f...]"
+    // or "[file: notes.pdf, f...]".
     std::string marker() const
     {
         std::string dims = width && height ? " " + std::to_string(width) + "x" + std::to_string(height) : "";
-        return std::string("[") + (image() ? "image: " : "file: ") + name + dims + ", " + label() + "]";
+        if (duration > 0)
+        {
+            const int s = static_cast<int>(duration + 0.5);
+            const std::string sec = std::to_string(s % 60);
+            dims += " " + std::to_string(s / 60) + ":" + (sec.size() < 2 ? "0" : "") + sec;
+        }
+        return std::string("[") + (image() ? "image: " : video() ? "video: " : "file: ") + name + dims + ", " +
+               label() + "]";
     }
 
     static AttachmentItem fromJson(const Json::Value &v)
     {
         return {v["id"].asString(), v["name"].asString(), v["type"].asString(), v["size"].asInt64(),
-                v["width"].asInt(), v["height"].asInt()};
+                v["width"].asInt(), v["height"].asInt(), v["duration"].isNumeric() ? v["duration"].asDouble() : 0};
     }
 
     static std::vector<AttachmentItem> listFromJson(const Json::Value &v)
@@ -61,7 +71,20 @@ struct AttachmentItem
 
 namespace attach
 {
-constexpr int64_t kMaxSize = 10 * 1024 * 1024;  // the server's limit
+constexpr int64_t kMaxSize = 10 * 1024 * 1024;       // the server's limit for images and PDFs
+constexpr int64_t kMaxVideoSize = 50 * 1024 * 1024;  // and for videos
+
+// The most the server takes of a file of `type`.
+inline int64_t maxFor(const std::string &type)
+{
+    return type.rfind("video/", 0) == 0 ? kMaxVideoSize : kMaxSize;
+}
+
+// "10 MB" or "50 MB".
+inline std::string maxLabel(const std::string &type)
+{
+    return std::to_string(maxFor(type) / (1024 * 1024)) + " MB";
+}
 
 // The type of file `path` by its first bytes, as the server judges it: one of
 // the types it takes, or "" (also when it can't be read or isn't a file).
@@ -71,7 +94,7 @@ inline std::string sniff(const std::string &path)
     if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
         return "";
     std::ifstream in(path, std::ios::binary);
-    char b[12] = {};
+    char b[64] = {};
     in.read(b, sizeof(b));
     const std::string h(b, static_cast<size_t>(in.gcount()));
     if (h.rfind("\x89PNG\r\n\x1a\n", 0) == 0)
@@ -84,6 +107,17 @@ inline std::string sniff(const std::string &path)
         return "image/webp";
     if (h.rfind("%PDF-", 0) == 0)
         return "application/pdf";
+    // MP4: an ftyp box, unless its brand is an image's (HEIF, AVIF) or QuickTime.
+    if (h.size() >= 12 && h.compare(4, 4, "ftyp") == 0)
+    {
+        const std::string brand = h.substr(8, 4);
+        for (const char *no : {"heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1", "avif", "avis", "qt  ", "crx "})
+            if (brand == no)
+                return "";
+        return "video/mp4";
+    }
+    if (h.rfind("\x1A\x45\xDF\xA3", 0) == 0 && h.find("webm") != std::string::npos)
+        return "video/webm";
     return "";
 }
 

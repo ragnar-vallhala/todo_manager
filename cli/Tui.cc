@@ -21,11 +21,13 @@
 #include <cmath>
 #include <csignal>
 #include <ctime>
+#include <cstdlib>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <set>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -888,9 +890,20 @@ std::string shellQuote(const std::string &s)
     return out + "'";
 }
 
-// Runs `xdg-open path` in the background, detached from the terminal, so
-// the viewer's output doesn't land on the screen.
-void openExternally(const std::string &path)
+// Whether `program` is on the PATH.
+bool onPath(const std::string &program)
+{
+    const char *path = std::getenv("PATH");
+    std::istringstream dirs(path ? path : "");
+    for (std::string dir; std::getline(dirs, dir, ':');)
+        if (!dir.empty() && access((dir + "/" + program).c_str(), X_OK) == 0)
+            return true;
+    return false;
+}
+
+// Runs `opener path` (xdg-open unless said) in the background, detached
+// from the terminal, so the viewer's output doesn't land on the screen.
+void openExternally(const std::string &path, const char *opener = "xdg-open")
 {
     const pid_t pid = fork();
     if (pid == 0)
@@ -902,7 +915,7 @@ void openExternally(const std::string &path)
             dup2(null, STDIN_FILENO);
             dup2(null, STDOUT_FILENO);
             dup2(null, STDERR_FILENO);
-            execlp("xdg-open", "xdg-open", path.c_str(), static_cast<char *>(nullptr));
+            execlp(opener, opener, path.c_str(), static_cast<char *>(nullptr));
         }
         _exit(0);
     }
@@ -2341,9 +2354,10 @@ class App
         {
             std::error_code ec;
             const auto size = std::filesystem::file_size(offerPath_, ec);
-            if (ec || static_cast<int64_t>(size) > attach::kMaxSize)
+            const auto type = attach::sniff(offerPath_);
+            if (ec || static_cast<int64_t>(size) > attach::maxFor(type))
             {
-                flash(attach::baseName(offerPath_) + (ec ? " can't be read" : " is over 10 MB"), true);
+                flash(attach::baseName(offerPath_) + (ec ? " can't be read" : " is over " + attach::maxLabel(type)), true);
                 declined_.insert(offerPath_);
             }
             else
@@ -2409,7 +2423,7 @@ class App
     }
 
     // Downloads `a` (once, into the cache) and shows it: inline in kitty for
-    // images, else with xdg-open.
+    // images, videos in mpv if it's there, else with xdg-open.
     void openAttachment(const AttachmentItem &a)
     {
         namespace fs = std::filesystem;
@@ -2437,8 +2451,9 @@ class App
         }
         if (a.image() && inKitty() && showInline(a, path))
             return;
-        openExternally(path.string());
-        flash("Opening " + a.name + " (xdg-open)", false);
+        const char *opener = a.video() && onPath("mpv") ? "mpv" : "xdg-open";
+        openExternally(path.string(), opener);
+        flash("Opening " + a.name + " (" + opener + ")", false);
     }
 
     // Shows image `a`, saved at `path`, over the UI. Kitty takes PNG, so

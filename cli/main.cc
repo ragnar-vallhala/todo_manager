@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -157,11 +158,14 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
                                       or reads the room again rejoins
   room say <ROOM> [--file PATH...] <TEXT...|->
                                       post a message (- reads stdin), with
-                                      files attached (images or PDFs, up to
-                                      10 MB each; the text can be left out)
+                                      files attached (images or PDFs up to
+                                      10 MB, MP4 or WebM videos up to 50 MB;
+                                      the text can be left out)
   room get <ROOM> <FILE-ID> [-o PATH] save an attachment (to PATH, a file or
                                       folder, else its name here); prints
                                       where it went
+  room files <ROOM> [-n N]            the room's attachments, newest first
+                                      (the last N, else all)
   room read <ROOM> [--since ID] [-n N]
                                       messages after ID, else the last N (20)
   room wait <ROOM> [--since ID] [-t SECONDS]
@@ -180,8 +184,9 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
   Messages print as [#ID] time author: text, in the order they were posted;
   pass the last ID as --since to read on from there. New messages take the
   lowest id free in the room. Changes to a room's todos show up as events.
-  Attachments print under the text as [image: NAME WxH, fID] or
-  [file: NAME, fID]; fID is what room get takes.
+  Attachments print under the text as [image: NAME WxH, fID],
+  [video: NAME WxH M:SS, fID] or [file: NAME, fID]; fID is what room get
+  takes.
 
 Who you are in rooms, first match wins: --as NAME, $TODO_AGENT, $USER.
 
@@ -398,10 +403,11 @@ std::vector<AttachmentItem> uploadFiles(Api &api, const std::vector<std::string>
         std::ifstream in(p, std::ios::binary | std::ios::ate);
         if (!in)
             throw UsageError("can't read " + p);
-        if (attach::sniff(p).empty())
-            throw UsageError(p + " isn't an image (PNG, JPEG, GIF, WebP) or a PDF");
-        if (static_cast<int64_t>(in.tellg()) > attach::kMaxSize)
-            throw UsageError(p + " is over 10 MB, the most the server takes");
+        const auto type = attach::sniff(p);
+        if (type.empty())
+            throw UsageError(p + " isn't an image (PNG, JPEG, GIF, WebP), a PDF or a video (MP4, WebM)");
+        if (static_cast<int64_t>(in.tellg()) > attach::maxFor(type))
+            throw UsageError(p + " is over " + attach::maxLabel(type) + ", the most the server takes");
     }
     std::vector<AttachmentItem> out;
     for (const auto &p : paths)
@@ -968,14 +974,48 @@ int cmdRoom(Api &api, std::vector<std::string> args)
         need(4, "get <ROOM> <FILE-ID> [-o PATH]");
         const auto room = resolveRoom(api, args[2]);
         const auto id = fileId(args[3]);
-        auto msgs = api.messages(room.id, 0, 1000);
-        const auto prunedMsgs = api.prunedMessages(room.id);
-        msgs.insert(msgs.end(), prunedMsgs.begin(), prunedMsgs.end());
-        for (const auto &m : msgs)
+        // The whole log, a page at a time, then the pruned messages.
+        for (int64_t before = 0;;)
+        {
+            const auto page = api.roomFiles(room.id, before, 1000);
+            for (const auto &f : page)
+                if (f.file.id == id)
+                    return saveAttachment(api, f.file, out), 0;
+            if (page.size() < 1000)
+                break;
+            before = page.back().seq;
+        }
+        for (const auto &m : api.prunedMessages(room.id))
             for (const auto &a : m.attachments)
                 if (a.id == id)
                     return saveAttachment(api, a, out), 0;
         throw UsageError("no file f" + id + " in " + room.name + " (see: todo room read " + room.name + ")");
+    }
+
+    if (sub == "files")
+    {
+        auto n = takeOpt(args, "-n", "--lines");
+        need(3, "files <ROOM> [-n N]");
+        const auto room = resolveRoom(api, args[2]);
+        const size_t want = n ? static_cast<size_t>(parseId(*n)) : SIZE_MAX;
+        size_t shown = 0;
+        for (int64_t before = 0; shown < want;)
+        {
+            const auto page = api.roomFiles(room.id, before, 1000);
+            for (const auto &f : page)
+            {
+                if (shown++ >= want)
+                    break;
+                std::cout << c("2", "[#" + std::to_string(f.messageId) + "] " + rooms::clock(f.createdAt) + " ") +
+                                 (f.author.empty() ? "server" : f.author) + "  " + c("36", f.file.marker()) + "\n";
+            }
+            if (page.size() < 1000)
+                break;
+            before = page.back().seq;
+        }
+        if (shown == 0)
+            std::cout << "No files in " << room.name << "\n";
+        return 0;
     }
 
     if (sub == "read")

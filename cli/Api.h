@@ -273,6 +273,19 @@ class Api
         return out;
     }
 
+    // A room's attachments, newest first, each with the message it's on;
+    // from messages before seq `before` (0: from the newest).
+    std::vector<RoomFileItem> roomFiles(int64_t roomId, int64_t before = 0, size_t limit = 1000)
+    {
+        std::string q = roomPath(roomId) + "/files?limit=" + std::to_string(limit);
+        if (before > 0)
+            q += "&before=" + std::to_string(before);
+        std::vector<RoomFileItem> out;
+        for (const auto &v : send(drogon::Get, q))
+            out.push_back(RoomFileItem::fromJson(v));
+        return out;
+    }
+
     // `text` may be "" when there are attachments (uploaded with upload()).
     MessageItem post(int64_t roomId, const std::string &text,
                      const std::vector<AttachmentItem> &attachments = {})
@@ -286,7 +299,7 @@ class Api
 
     // ── files ──
 
-    // Uploads the file at `path` (an image or PDF, at most 10 MB) so it can
+    // Uploads the file at `path` (an image or PDF up to 10 MB, a video up to 50 MB) so it can
     // be attached; throws ApiError if it can't be read or the server says no.
     AttachmentItem upload(const std::string &path)
     {
@@ -294,15 +307,16 @@ class Api
         if (!in)
             throw ApiError("can't read " + path, false);
         std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (static_cast<int64_t>(data.size()) > attach::kMaxSize)
-            throw ApiError(path + " is over 10 MB, the most the server takes", false);
+        const auto type = attach::sniff(path);
+        if (static_cast<int64_t>(data.size()) > attach::maxFor(type))
+            throw ApiError(path + " is over " + attach::maxLabel(type) + ", the most the server takes", false);
         auto req = drogon::HttpRequest::newHttpRequest();
         req->setMethod(drogon::Post);
         req->setPath("/api/files");
         req->setParameter("name", attach::baseName(path));
         req->setContentTypeString("application/octet-stream");
         req->setBody(std::move(data));
-        return AttachmentItem::fromJson(sendRequest(req, 60));
+        return AttachmentItem::fromJson(sendRequest(req, 300));
     }
 
     // The bytes of file `id`.
@@ -312,7 +326,7 @@ class Api
         req->setMethod(drogon::Get);
         req->setPath("/api/files/" + id);
         std::string body;
-        sendRequest(req, 60, &body);
+        sendRequest(req, 300, &body);
         return body;
     }
 

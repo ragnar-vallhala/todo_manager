@@ -39,6 +39,22 @@ struct RoomItem
 
 // Ids are per room and get reused once pruned; `seq` orders the log and is
 // the cursor for reading what's new.
+// An attachment in a room's log, with the message it's on.
+struct RoomFileItem
+{
+    AttachmentItem file;
+    int64_t messageId{0};
+    int64_t seq{0};
+    std::string author;
+    int64_t createdAt{0};
+
+    static RoomFileItem fromJson(const Json::Value &v)
+    {
+        return {AttachmentItem::fromJson(v), v["messageId"].asInt64(), v["seq"].asInt64(),
+                v["author"].isString() ? v["author"].asString() : "", v["createdAt"].asInt64()};
+    }
+};
+
 struct MessageItem
 {
     int64_t id{0};

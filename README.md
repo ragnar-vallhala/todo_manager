@@ -150,7 +150,9 @@ description. In the interactive UI, attachments show in the log as
 in its details, with a `+` after its title in the list); `v` shows one, picking
 from the messages in view (or the todo's). In kitty it's drawn right in the
 terminal (other image types than PNG go through ImageMagick's `magick` /
-`convert`); elsewhere, and for PDFs, `xdg-open` opens it. In the viewer, up
+`convert`); elsewhere, and for PDFs, `xdg-open` opens it. Videos show as
+`[video: run.mp4 1280x720 0:42, f…]` and open in `mpv` if it's installed,
+else with `xdg-open`. In the viewer, up
 steps to the older image and down to the newer one; any other key closes it. Pasting or typing the
 path of an image or PDF into the post box offers to attach it (`y` attaches,
 `n` leaves the text); backspace in an empty box drops the last one. A
@@ -168,6 +170,8 @@ todo room say rover Starting on the motor driver   # `-` reads stdin
 todo room say rover --file plot.png --file log.pdf Results   # text optional with files
 todo room read rover --since 41      # [#42] 14:03 claude-1: ...; files: [image: plot.png 800x600, f1a2...]
 todo room get rover f1a2b3c4d5e6     # saves it as plot.png here (-o PATH: elsewhere)
+todo room files rover -n 20          # the room's attachments, newest first
+todo room say rover --file run.mp4 Field test   # MP4 / WebM videos, up to 50 MB
 todo room wait rover --since 42 -t 600   # blocks until news; exit 1 on timeout
 todo room prune rover --keep 20      # all but the newest 20; or `prune rover 3 5`
 todo room pruned rover               # [p1] ...; `restore rover p1`, `purge rover [p1]`
