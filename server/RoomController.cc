@@ -124,10 +124,11 @@ void RoomController::removeMember(const HttpRequestPtr &req, Callback &&cb, int6
     }
 }
 
-// GET /api/rooms/{id}/messages[?since=SEQ][&limit=N][&wait=SECONDS][&agent=NAME]
+// GET /api/rooms/{id}/messages[?since=SEQ][&before=SEQ][&limit=N][&wait=SECONDS][&agent=NAME]
 // Oldest first. `since` is a cursor: a message's seq, or a room's `cursor`.
 // With `wait`, answers as soon as there's a message after `since`, or with
-// [] once `wait` seconds pass.
+// [] once `wait` seconds pass. `before` pages back through history: the
+// newest `limit` messages older than that seq (it doesn't wait).
 void RoomController::messages(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     std::string err;
@@ -150,6 +151,14 @@ void RoomController::messages(const HttpRequestPtr &req, Callback &&cb, int64_t 
         limitParam.empty() ? rooms::kDefaultLimit
                            : std::clamp<long long>(std::atoll(limitParam.c_str()), 1, rooms::kMaxLimit);
     const double wait = std::clamp(std::atof(req->getParameter("wait").c_str()), 0.0, rooms::kMaxWait);
+    const int64_t before = std::atoll(req->getParameter("before").c_str());
+    if (before > 0)
+    {
+        Json::Value arr(Json::arrayValue);
+        for (const auto &m : TodoStore::get().messages(id, since, limit, before))
+            arr.append(m.toJson());
+        return cb(json(arr));
+    }
 
     RoomHub::get().wait(id, since, limit, wait, [cb = std::move(cb)](std::vector<Message> msgs) {
         Json::Value arr(Json::arrayValue);
@@ -157,6 +166,31 @@ void RoomController::messages(const HttpRequestPtr &req, Callback &&cb, int64_t 
             arr.append(m.toJson());
         cb(json(arr));
     });
+}
+
+// GET /api/rooms/{id}/files[?before=SEQ][&limit=N]  -- the room's
+// attachments, newest first, each with the message it's on: its
+// "messageId", "seq", "author" and "createdAt". Page back with `before` =
+// the last one's seq. Doesn't make the caller a member.
+void RoomController::files(const HttpRequestPtr &req, Callback &&cb, int64_t id)
+{
+    try
+    {
+        TodoStore::get().room(id);
+    }
+    catch (const StoreError &e)
+    {
+        return cb(error(e));
+    }
+    const auto limitParam = req->getParameter("limit");
+    const size_t limit =
+        limitParam.empty() ? rooms::kDefaultLimit
+                           : std::clamp<long long>(std::atoll(limitParam.c_str()), 1, rooms::kMaxLimit);
+    const int64_t before = std::atoll(req->getParameter("before").c_str());
+    Json::Value arr(Json::arrayValue);
+    for (const auto &f : TodoStore::get().files(id, before, limit))
+        arr.append(f.toJson());
+    cb(json(arr));
 }
 
 // POST /api/rooms/{id}/messages  {"text": "...", "author"?: "...",

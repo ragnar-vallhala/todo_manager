@@ -16,6 +16,7 @@ class RoomController : public HttpController<RoomController>
     ADD_METHOD_TO(RoomController::removeMember, "/api/rooms/{id}/members", Delete);
     ADD_METHOD_TO(RoomController::messages, "/api/rooms/{id}/messages", Get);
     ADD_METHOD_TO(RoomController::post, "/api/rooms/{id}/messages", Post);
+    ADD_METHOD_TO(RoomController::files, "/api/rooms/{id}/files", Get);
     ADD_METHOD_TO(RoomController::pruneAll, "/api/rooms/{id}/messages/prune", Post);
     ADD_METHOD_TO(RoomController::prune, "/api/rooms/{id}/messages/{mid}/prune", Post);
     ADD_METHOD_TO(RoomController::listPruned, "/api/rooms/{id}/pruned", Get);
@@ -34,6 +35,7 @@ class RoomController : public HttpController<RoomController>
     void removeMember(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void messages(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void post(const HttpRequestPtr &req, Callback &&cb, int64_t id);
+    void files(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void pruneAll(const HttpRequestPtr &req, Callback &&cb, int64_t id);
     void prune(const HttpRequestPtr &req, Callback &&cb, int64_t id, int64_t mid);
     void listPruned(const HttpRequestPtr &req, Callback &&cb, int64_t id);

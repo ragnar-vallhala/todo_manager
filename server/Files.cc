@@ -2,6 +2,8 @@
 
 #include <drogon/utils/Utilities.h>
 
+#include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -86,12 +88,187 @@ std::pair<int, int> dimensions(std::string_view d, const std::string &type)
     return {0, 0};
 }
 
+uint32_t be32(std::string_view d, size_t i)
+{
+    return static_cast<uint32_t>(be16(d, i)) << 16 | be16(d, i + 2);
+}
+
+uint64_t be64(std::string_view d, size_t i)
+{
+    return static_cast<uint64_t>(be32(d, i)) << 32 | be32(d, i + 4);
+}
+
+// What a video's headers say: its size in pixels (as shown, so turned for
+// portrait phone videos) and its length in seconds; zeros where they don't.
+struct VideoInfo
+{
+    int width{0}, height{0};
+    double duration{0};
+};
+
+// MP4: the movie header (mvhd) has the length; the first track header
+// (tkhd) with a size is the picture's, its matrix saying if it's turned.
+void mp4Boxes(std::string_view d, size_t from, size_t to, VideoInfo &info)
+{
+    for (size_t i = from; i + 8 <= to;)
+    {
+        uint64_t size = be32(d, i);
+        const auto type = d.substr(i + 4, 4);
+        size_t header = 8;
+        if (size == 1 && i + 16 <= to)
+        {
+            size = be64(d, i + 8);
+            header = 16;
+        }
+        else if (size == 0)
+            size = to - i;
+        if (size < header || size > to - i)
+            return;
+        const size_t body = i + header, end = i + static_cast<size_t>(size);
+        if (type == "moov" || type == "trak")
+            mp4Boxes(d, body, end, info);
+        else if (type == "mvhd" && end - body >= 32)
+        {
+            const bool v1 = d[body] == 1;
+            const uint32_t scale = be32(d, body + (v1 ? 20 : 12));
+            const uint64_t length = v1 ? be64(d, body + 24) : be32(d, body + 16);
+            if (scale)
+                info.duration = static_cast<double>(length) / scale;
+        }
+        else if (type == "tkhd" && !info.width && end - body >= 84)
+        {
+            const size_t m = body + (d[body] == 1 ? 52 : 40);  // the matrix
+            if (m + 44 <= end)
+            {
+                const int w = static_cast<int>(be32(d, m + 36) >> 16);
+                const int h = static_cast<int>(be32(d, m + 40) >> 16);
+                // a == 0 and b != 0: turned a quarter.
+                const bool turned = be32(d, m) == 0 && be32(d, m + 4) != 0;
+                if (w > 0 && h > 0)
+                {
+                    info.width = turned ? h : w;
+                    info.height = turned ? w : h;
+                }
+            }
+        }
+        i = end;
+    }
+}
+
+// WebM (EBML): Segment > Info > Duration (in TimecodeScale units) and
+// Segment > Tracks > TrackEntry > Video > PixelWidth / PixelHeight.
+size_t ebmlLength(std::string_view d, size_t i, uint64_t &value, bool keepMarker)
+{
+    if (i >= d.size())
+        return 0;
+    const auto first = static_cast<unsigned char>(d[i]);
+    size_t len = 1;
+    while (len <= 8 && !(first & (0x80 >> (len - 1))))
+        ++len;
+    if (len > 8 || i + len > d.size())
+        return 0;
+    value = keepMarker ? first : first & (0xFF >> len);
+    for (size_t k = 1; k < len; ++k)
+        value = value << 8 | static_cast<unsigned char>(d[i + k]);
+    return len;
+}
+
+void ebml(std::string_view d, size_t from, size_t to, VideoInfo &info, uint64_t &scale, double &rawDuration)
+{
+    for (size_t i = from; i < to;)
+    {
+        uint64_t id = 0, size = 0;
+        const size_t idLen = ebmlLength(d, i, id, true);
+        if (!idLen)
+            return;
+        const size_t sizeLen = ebmlLength(d, i + idLen, size, false);
+        if (!sizeLen)
+            return;
+        const size_t body = i + idLen + sizeLen;
+        // All ones: size unknown (streamed files); runs to the end of its parent.
+        const bool unknown = size == (uint64_t(1) << (7 * sizeLen)) - 1;
+        const size_t end = unknown || size > to - std::min(body, to) ? to : body + static_cast<size_t>(size);
+        auto uint = [&] {
+            uint64_t v = 0;
+            for (size_t k = body; k < end && k < body + 8; ++k)
+                v = v << 8 | static_cast<unsigned char>(d[k]);
+            return v;
+        };
+        switch (id)
+        {
+        case 0x18538067:  // Segment
+        case 0x1549A966:  // Info
+        case 0x1654AE6B:  // Tracks
+        case 0xAE:        // TrackEntry
+        case 0xE0:        // Video
+            ebml(d, body, end, info, scale, rawDuration);
+            break;
+        case 0x2AD7B1:  // TimecodeScale (ns)
+            scale = uint();
+            break;
+        case 0x4489:  // Duration (float)
+            if (end - body == 4)
+            {
+                const uint32_t bits = be32(d, body);
+                float f;
+                std::memcpy(&f, &bits, 4);
+                rawDuration = f;
+            }
+            else if (end - body == 8)
+            {
+                const uint64_t bits = be64(d, body);
+                double f;
+                std::memcpy(&f, &bits, 8);
+                rawDuration = f;
+            }
+            break;
+        case 0xB0:  // PixelWidth
+            if (!info.width)
+                info.width = static_cast<int>(uint());
+            break;
+        case 0xBA:  // PixelHeight
+            if (!info.height)
+                info.height = static_cast<int>(uint());
+            break;
+        case 0x1F43B675:  // Cluster: the frames; the headers are all before.
+            return;
+        default:
+            break;
+        }
+        if (unknown)
+            return;
+        i = end;
+    }
+}
+
+VideoInfo videoInfo(std::string_view d, const std::string &type)
+{
+    VideoInfo info;
+    if (type == "video/mp4")
+        mp4Boxes(d, 0, d.size(), info);
+    else if (type == "video/webm")
+    {
+        uint64_t scale = 1000000;
+        double raw = 0;
+        ebml(d, 0, d.size(), info, scale, raw);
+        if (raw > 0)
+            info.duration = raw * static_cast<double>(scale) / 1e9;
+    }
+    if (info.width <= 0 || info.height <= 0 || info.width > 100000 || info.height > 100000)
+        info.width = info.height = 0;
+    if (!(info.duration > 0 && info.duration < 1e7))
+        info.duration = 0;
+    return info;
+}
+
 const char *extension(const std::string &type)
 {
     return type == "image/png"    ? ".png"
            : type == "image/jpeg" ? ".jpg"
            : type == "image/gif"  ? ".gif"
            : type == "image/webp" ? ".webp"
+           : type == "video/mp4"  ? ".mp4"
+           : type == "video/webm" ? ".webm"
                                   : ".pdf";
 }
 
@@ -102,7 +279,15 @@ Attachment describe(const std::string &id, std::string_view data, const std::str
     a.type = files::sniff(data);
     a.name = files::cleanName(name, a.type);
     a.size = static_cast<int64_t>(data.size());
-    std::tie(a.width, a.height) = dimensions(data, a.type);
+    if (files::isVideo(a.type))
+    {
+        const auto v = videoInfo(data, a.type);
+        a.width = v.width;
+        a.height = v.height;
+        a.duration = v.duration;
+    }
+    else
+        std::tie(a.width, a.height) = dimensions(data, a.type);
     return a;
 }
 }  // namespace
@@ -130,6 +315,19 @@ std::string sniff(std::string_view d)
         return "image/webp";
     if (starts("%PDF-"))
         return "application/pdf";
+    // MP4 (ISO media): an "ftyp" box first. HEIF and AVIF images use it
+    // too, and QuickTime is its own type, so go by the major brand.
+    if (starts("ftyp", 4) && d.size() >= 12)
+    {
+        const auto brand = d.substr(8, 4);
+        for (std::string_view no : {"heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1", "avif", "avis", "qt  ", "crx "})
+            if (brand == no)
+                return "";
+        return "video/mp4";
+    }
+    // WebM: an EBML header whose DocType is "webm" (not other Matroska).
+    if (starts("\x1A\x45\xDF\xA3") && d.substr(0, std::min<size_t>(d.size(), 64)).find("webm") != std::string_view::npos)
+        return "video/webm";
     return "";
 }
 
@@ -157,13 +355,15 @@ std::string cleanName(const std::string &name, const std::string &type)
 
 Attachment store(std::string_view data, const std::string &name)
 {
-    if (data.size() > kMaxSize)
-        throw StoreError(413, "files can be at most 10 MB");
+    if (data.size() > kMaxVideoSize)
+        throw StoreError(413, "files can be at most 50 MB (videos) or 10 MB (images and PDFs)");
     if (data.empty())
         throw StoreError(400, "the file is empty");
     const auto type = sniff(data);
     if (type.empty())
-        throw StoreError(400, "only PNG, JPEG, GIF, WebP and PDF files can be attached");
+        throw StoreError(400, "only PNG, JPEG, GIF, WebP, PDF, MP4 and WebM files can be attached");
+    if (!isVideo(type) && data.size() > kMaxSize)
+        throw StoreError(413, "images and PDFs can be at most 10 MB");
 
     const std::string id = lower(drogon::utils::getSha256(data.data(), data.size())).substr(0, kIdLength);
     const std::string path = pathOf(id);

@@ -19,8 +19,9 @@ static void usage(const char *prog)
               << "  -w, --web DIR       web UI directory (default " TODO_PUBLIC_DIR ")\n";
 }
 
-// Room for a 10 MB file base64-encoded in JSON, or wrapped in multipart.
-constexpr size_t kMaxBody = files::kMaxSize / 3 * 4 + 64 * 1024;
+// Room for the biggest file (a 50 MB video) base64-encoded in JSON, or
+// wrapped in multipart.
+constexpr size_t kMaxBody = files::kMaxVideoSize / 3 * 4 + 64 * 1024;
 
 int main(int argc, char *argv[])
 {
@@ -77,10 +78,13 @@ int main(int argc, char *argv[])
         // Room reads may wait up to 300 s for news; the default (60 s) would
         // drop them first.
         .setIdleConnectionTimeout(330)
-        // Uploads are up to 10 MB (Files.h); over MCP they come base64-encoded,
-        // a third bigger. Bodies are kept in memory rather than in temp files.
+        // Uploads are up to 50 MB (videos; Files.h); over MCP they come
+        // base64-encoded, a third bigger. Bodies are kept in memory rather
+        // than in temp files.
         .setClientMaxBodySize(kMaxBody)
         .setClientMaxMemoryBodySize(kMaxBody)
+        // The only fractions are video lengths, in seconds: milliseconds will do.
+        .setFloatPrecisionInJson(3, "decimal")
         .setDocumentRoot(webDir)
         .run();
 }

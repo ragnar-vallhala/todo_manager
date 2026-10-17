@@ -153,14 +153,14 @@ Json::Value toolList()
                        {"attachments", ids}},
                       {"room"}));
     tools.append(tool("upload_file",
-                      "Upload an image (PNG, JPEG, GIF, WebP) or PDF, at most 10 MB, to attach "
-                      "to a message. Returns its id.",
+                      "Upload an image (PNG, JPEG, GIF, WebP) or PDF, at most 10 MB, or a video "
+                      "(MP4, WebM), at most 50 MB, to attach to a message. Returns its id.",
                       {{"name", prop("string", "File name, e.g. plot.png")},
                        {"data", prop("string", "The file's bytes, base64-encoded")}},
                       {"name", "data"}));
     tools.append(tool("get_file",
                       "Get a message's attachment by id: images come back as images, PDFs as "
-                      "an embedded resource.",
+                      "an embedded resource, videos as a description (they're too big).",
                       {{"id", prop("string", "The attachment's id")}}, {"id"}));
     tools.append(tool(
         "add_todo", "Add a todo to a room, optionally claiming it right away.",
@@ -329,7 +329,7 @@ void callTool(const std::string &name, const Json::Value &args, const std::strin
     if (name == "upload_file")
     {
         const auto fileName = stringArg(args, "name", true, 200);
-        const auto data = drogon::utils::base64Decode(stringArg(args, "data", true, files::kMaxSize * 2));
+        const auto data = drogon::utils::base64Decode(stringArg(args, "data", true, files::kMaxVideoSize / 3 * 4 + 16));
         return done(toolJson(files::store(data, fileName).toJson()));
     }
     if (name == "get_file")
@@ -338,6 +338,17 @@ void callTool(const std::string &name, const Json::Value &args, const std::strin
         const auto a = files::find(id);
         if (!a)
             throw StoreError(404, "no file " + id);
+        if (files::isVideo(a->type))
+        {
+            // Too big to hand over inline, and nothing to look at as text.
+            std::string about = "Video " + a->name + " (" + a->type + ", " + std::to_string(a->size) + " bytes";
+            if (a->width && a->height)
+                about += ", " + std::to_string(a->width) + "x" + std::to_string(a->height);
+            if (a->duration > 0)
+                about += ", " + std::to_string(static_cast<int>(a->duration + 0.5)) + " s";
+            about += "). Download it from /api/files/" + a->id + " on this server.";
+            return done(toolText(about));
+        }
         std::ifstream in(files::pathOf(id), std::ios::binary);
         const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         Json::Value c;

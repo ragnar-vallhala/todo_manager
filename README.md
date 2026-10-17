@@ -136,8 +136,8 @@ messages were posted, whatever their ids.
 
 ### Attachments
 
-Messages (and todos) can carry files: images (PNG, JPEG, GIF, WebP) and PDFs,
-up to 10 MB each and 10 per message. The server checks what a file is by its
+Messages (and todos) can carry files: images (PNG, JPEG, GIF, WebP) and PDFs
+up to 10 MB each, and videos (MP4, WebM) up to 50 MB; 10 per message. The server checks what a file is by its
 first bytes, not its name, and keeps each one once, in `files/` next to the data
 file, named by a hash of its content; that hash is the file's id, shown as
 `f1a2b3c4d5e6`.
@@ -392,7 +392,8 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | PATCH  | `/api/rooms/{id}`        | `{"name"?, "topic"?}`                       | → the room                   |
 | DELETE | `/api/rooms/{id}`        | –                                           | 204; deletes its messages, its todos stay |
 | DELETE | `/api/rooms/{id}/members` | –                                          | `?name=NAME` → the room, without them |
-| GET    | `/api/rooms/{id}/messages` | –                                         | `?since=SEQ&limit=N&wait=SECONDS` (long-poll, max 300) |
+| GET    | `/api/rooms/{id}/messages` | –                                         | `?since=SEQ&limit=N&wait=SECONDS` (long-poll, max 300); `&before=SEQ` pages back (no wait) |
+| GET    | `/api/rooms/{id}/files`  | –                                           | the room's attachments, newest first, each with `messageId`, `seq`, `author`, `createdAt`; `?before=SEQ&limit=N` |
 | POST   | `/api/rooms/{id}/messages` | `{"text", "author"?, "attachments"?}`     | 201 → the message; `text` may be `""` with attachments |
 | POST   | `/api/rooms/{id}/messages/{mid}/prune` | –                             | → the pruned message (its pN id) |
 | POST   | `/api/rooms/{id}/messages/prune` | `{"keep"?}`                         | prunes all but the newest `keep` (0) → `{"pruned": n}` |
@@ -400,8 +401,8 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | POST   | `/api/rooms/{id}/pruned/{pid}/restore` | –                             | 201 → the message, back in place, with a free id |
 | DELETE | `/api/rooms/{id}/pruned/{pid}` | –                                     | 204                          |
 | DELETE | `/api/rooms/{id}/pruned` | –                                           | → `{"removed": n}`           |
-| POST   | `/api/files`             | the file                                    | multipart (field `file`), or the raw body with `?name=`; 201 → `{"id", "name", "type", "size", "width"?, "height"?}`; 400 for other types, 413 over 10 MB |
-| GET    | `/api/files/{id}`        | –                                           | the file, with its type; `?name=` names it, `&download=1` saves it |
+| POST   | `/api/files`             | the file                                    | multipart (field `file`), or the raw body with `?name=`; 201 → `{"id", "name", "type", "size", "width"?, "height"?, "duration"?}`; 400 for other types, 413 over 10 MB (50 MB for video) |
+| GET    | `/api/files/{id}`        | –                                           | the file, with its type; `?name=` names it, `&download=1` saves it; honours `Range` (206) |
 | POST   | `/mcp`                   | JSON-RPC                                    | MCP endpoint (see Rooms)     |
 
 `categoryId` / `parentId` are an id, or `null` for none / top level.
@@ -410,7 +411,8 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 `attachments` (on todos and messages, left out when there are none) is a list
 of uploaded files: send `[{"id", "name"?}]` (or bare ids; a todo's PATCH replaces
 its list, `null` clears it) and the server fills in `type`, `size` and, for
-images, `width` / `height` from the file itself.
+images and videos, `width` / `height` (and a video's `duration` in seconds)
+from the file itself, when its headers say.
 A category's `style` is `null` or `{"fg"?, "bg"?: "#rrggbb", "bold"?, "italic"?,
 "underline"?: bool}`; a PATCH replaces the whole style.
 Without `archived=1`, the lists leave out archived categories, everything below

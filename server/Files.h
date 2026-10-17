@@ -11,18 +11,20 @@
 
 namespace files
 {
-constexpr size_t kMaxSize = 10 * 1024 * 1024;
+constexpr size_t kMaxSize = 10 * 1024 * 1024;       // images and PDFs
+constexpr size_t kMaxVideoSize = 50 * 1024 * 1024;  // MP4 and WebM
 constexpr size_t kMaxPerItem = 10;  // attachments on one message or todo
 
 // Files go in `dir` (created if missing).
 void init(const std::string &dir);
 
-// "image/png", "image/jpeg", "image/gif", "image/webp" or "application/pdf",
-// going by the first bytes; "" for anything else.
+// "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
+// "video/mp4" or "video/webm", going by the first bytes; "" for anything else.
 std::string sniff(std::string_view data);
 
 // Stores `data` (once: the same bytes get the same id) and describes it,
-// named `name`. 400 for a type we don't take, 413 if it's too big.
+// named `name`. 400 for a type we don't take, 413 if it's too big (10 MB,
+// or 50 MB for video).
 Attachment store(std::string_view data, const std::string &name);
 
 // The stored file `id`, described (type, size, width and height read from
@@ -32,6 +34,9 @@ std::optional<Attachment> find(const std::string &id, const std::string &name = 
 // Where file `id` is on disk ("f" + the id, as the clients show it, works
 // too); "" if the id isn't one of ours.
 std::string pathOf(const std::string &id);
+
+// True for the video types.
+inline bool isVideo(const std::string &type) { return type.rfind("video/", 0) == 0; }
 
 // A file name fit to show: no folders or control characters, at most 200
 // bytes; "" becomes "file" plus the type's extension.

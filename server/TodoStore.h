@@ -19,9 +19,10 @@ struct Attachment
 {
     std::string id;    // the file's content hash
     std::string name;  // as uploaded, e.g. "screenshot.png"
-    std::string type;  // "image/png", ..., "application/pdf"
+    std::string type;  // "image/png", ..., "application/pdf", "video/mp4", "video/webm"
     int64_t size{0};   // bytes
-    int width{0}, height{0};  // pixels, for images whose header says; else 0
+    int width{0}, height{0};  // pixels, for images and videos whose header says; else 0
+    double duration{0};       // seconds, for videos whose header says; else 0
 
     Json::Value toJson() const;
     static Attachment fromJson(const Json::Value &v);
@@ -146,6 +147,18 @@ struct Message
     Json::Value toJson() const;
 };
 
+// An attachment in a room's log, with the message it's on.
+struct RoomFile
+{
+    Attachment file;
+    int64_t messageId{0};
+    int64_t seq{0};
+    std::string author;
+    int64_t createdAt{0};
+
+    Json::Value toJson() const;
+};
+
 // A request the store refuses; `status` is the HTTP status to report.
 struct StoreError : std::runtime_error
 {
@@ -217,7 +230,13 @@ class TodoStore
                  const std::vector<Attachment> &attachments = {});
     // Messages with seq above `since`, oldest first, at most `limit` (the
     // newest ones if there are more). since 0 = from the start.
-    std::vector<Message> messages(int64_t roomId, int64_t since, size_t limit) const;
+    // The newest `limit` messages with seq after `since` (and before
+    // `before`, if that's set), oldest first.
+    std::vector<Message> messages(int64_t roomId, int64_t since, size_t limit, int64_t before = 0) const;
+    // The room's attachments, newest first, from messages before seq
+    // `before` (0: from the newest); about `limit` of them (a message's
+    // files aren't split).
+    std::vector<RoomFile> files(int64_t roomId, int64_t before, size_t limit) const;
     // The newest message's seq, the cursor to read or wait after; 0 if none.
     int64_t cursor(int64_t roomId) const;
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -118,6 +119,8 @@ Json::Value Attachment::toJson() const
         v["width"] = width;
         v["height"] = height;
     }
+    if (duration > 0)
+        v["duration"] = std::round(duration * 1000) / 1000;
     return v;
 }
 
@@ -130,6 +133,7 @@ Attachment Attachment::fromJson(const Json::Value &v)
     a.size = v["size"].asInt64();
     a.width = v["width"].asInt();
     a.height = v["height"].asInt();
+    a.duration = v["duration"].isNumeric() ? v["duration"].asDouble() : 0;
     return a;
 }
 
@@ -399,6 +403,8 @@ void TodoStore::save() const
         std::ofstream out(tmp, std::ios::trunc);
         Json::StreamWriterBuilder w;
         w["indentation"] = "  ";
+        w["precision"] = 3;
+        w["precisionType"] = "decimal";
         out << Json::writeString(w, root) << '\n';
         if (!out)
             throw std::runtime_error("Failed writing " + tmp);
@@ -917,16 +923,43 @@ Message TodoStore::post(int64_t roomId, const std::string &author, const std::st
     return m;
 }
 
-std::vector<Message> TodoStore::messages(int64_t roomId, int64_t since, size_t limit) const
+std::vector<Message> TodoStore::messages(int64_t roomId, int64_t since, size_t limit, int64_t before) const
 {
     std::lock_guard<std::mutex> lock(mu_);
     std::vector<Message> out;
     for (const auto &m : messages_)
-        if (m.roomId == roomId && m.seq > since)
+        if (m.roomId == roomId && m.seq > since && (before <= 0 || m.seq < before))
             out.push_back(m);
     if (out.size() > limit)
         out.erase(out.begin(), out.end() - static_cast<std::ptrdiff_t>(limit));
     return out;
+}
+
+std::vector<RoomFile> TodoStore::files(int64_t roomId, int64_t before, size_t limit) const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<RoomFile> out;
+    // Newest first, a message's files together (so `before` = the last
+    // one's seq picks up where this left off).
+    for (auto it = messages_.rbegin(); it != messages_.rend() && out.size() < limit; ++it)
+    {
+        const Message &m = *it;
+        if (m.roomId != roomId || (before > 0 && m.seq >= before))
+            continue;
+        for (const auto &a : m.attachments)
+            out.push_back(RoomFile{a, m.id, m.seq, m.author, m.createdAt});
+    }
+    return out;
+}
+
+Json::Value RoomFile::toJson() const
+{
+    Json::Value v = file.toJson();
+    v["messageId"] = static_cast<Json::Int64>(messageId);
+    v["seq"] = static_cast<Json::Int64>(seq);
+    v["author"] = author.empty() ? Json::Value() : Json::Value(author);
+    v["createdAt"] = static_cast<Json::Int64>(createdAt);
+    return v;
 }
 
 int64_t TodoStore::cursor(int64_t roomId) const
