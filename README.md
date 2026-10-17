@@ -152,7 +152,9 @@ from the messages in view (or the todo's). In kitty it's drawn right in the
 terminal (other image types than PNG go through ImageMagick's `magick` /
 `convert`); elsewhere, and for PDFs, `xdg-open` opens it. Pasting or typing the
 path of an image or PDF into the post box offers to attach it (`y` attaches,
-`n` leaves the text); backspace in an empty box drops the last one.
+`n` leaves the text); backspace in an empty box drops the last one. A
+screenshot on the clipboard (no file behind it) is attached with Ctrl+V in the
+post box, read through `wl-paste` or `xclip`.
 
 From the CLI, you are `--as NAME`, else `$TODO_AGENT`, else `$USER`:
 

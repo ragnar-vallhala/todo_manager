@@ -910,6 +910,39 @@ void openExternally(const std::string &path)
         waitpid(pid, nullptr, 0);
 }
 
+// Saves an image on the clipboard (a screenshot, say) as a PNG in the cache
+// and returns its path; "" if the clipboard holds no image. Terminals only
+// paste text, so this asks wl-paste (Wayland) or xclip (X11) directly.
+std::string clipboardImage()
+{
+    const bool wayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
+    const std::string types = wayland ? "wl-paste --list-types 2>/dev/null"
+                                      : "xclip -selection clipboard -t TARGETS -o 2>/dev/null";
+    FILE *t = popen(types.c_str(), "r");
+    if (!t)
+        return "";
+    bool png = false;
+    char line[256];
+    while (fgets(line, sizeof line, t))
+        png = png || std::string(line).rfind("image/png", 0) == 0;
+    pclose(t);
+    if (!png)
+        return "";
+
+    std::error_code ec;
+    const auto dir = fileCacheDir().parent_path() / "clipboard";
+    std::filesystem::create_directories(dir, ec);
+    char name[64];
+    const std::time_t now = std::time(nullptr);
+    std::strftime(name, sizeof name, "screenshot-%Y%m%d-%H%M%S.png", std::localtime(&now));
+    const std::string path = (dir / name).string();
+    const std::string get = (wayland ? "wl-paste --type image/png" : "xclip -selection clipboard -t image/png -o") +
+                            std::string(" > ") + shellQuote(path) + " 2>/dev/null";
+    if (std::system(get.c_str()) != 0 || std::filesystem::file_size(path, ec) == 0 || ec)
+        return "";
+    return path;
+}
+
 // A PNG's size from its header; 0 x 0 if it isn't one.
 std::pair<int, int> pngSize(const std::string &png)
 {
@@ -2078,6 +2111,23 @@ class App
         if (k.type == Key::Esc)
         {
             mode_ = Mode::Normal;
+            return;
+        }
+        // Ctrl+V, or a paste with no text (the terminal had only an image to
+        // give): attach the image on the clipboard, if there is one.
+        if (mode_ == Mode::PostMessage &&
+            (k.ctrl('v') || (k.type == Key::Paste && trim(k.ch).empty())))
+        {
+            const std::string img = clipboardImage();
+            if (img.empty())
+                flash("No image on the clipboard", true);
+            else if (static_cast<int64_t>(std::filesystem::file_size(img)) > attach::kMaxSize)
+                flash("The clipboard image is over 10 MB", true);
+            else
+            {
+                pendingFiles_.push_back(img);
+                flash("Attached the clipboard image", false);
+            }
             return;
         }
         if (k.type == Key::Paste)
@@ -3260,7 +3310,7 @@ class App
             !offerPath_.empty()     ? " " + keys_.labels("confirm_yes", 1) + " attach · " +
                                       keys_.labels("confirm_no", 1) + " leave it as text "
             : !pendingFiles_.empty() ? " enter post · backspace in an empty box drops a file · esc cancel "
-                                     : " enter post · shift/alt+enter new line · esc cancel ";
+                                     : " enter post · shift/alt+enter new line · ctrl+v image · esc cancel ";
         auto [x, y] = popup(W, H, w, rows + 2 + extra,
                             "Post to " + roomName(sayRoom_) + " as " + api_.agent(), footer);
         std::tie(cx, cy) = input_.drawWrapped(c_, x + 2, y + 1, w - 4, rows, Style());
