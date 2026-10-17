@@ -150,7 +150,8 @@ description. In the interactive UI, attachments show in the log as
 in its details, with a `+` after its title in the list); `v` shows one, picking
 from the messages in view (or the todo's). In kitty it's drawn right in the
 terminal (other image types than PNG go through ImageMagick's `magick` /
-`convert`); elsewhere, and for PDFs, `xdg-open` opens it. Pasting or typing the
+`convert`); elsewhere, and for PDFs, `xdg-open` opens it. In the viewer, up
+steps to the older image and down to the newer one; any other key closes it. Pasting or typing the
 path of an image or PDF into the post box offers to attach it (`y` attaches,
 `n` leaves the text); backspace in an empty box drops the last one. A
 screenshot on the clipboard (no file behind it) is attached with Ctrl+V in the

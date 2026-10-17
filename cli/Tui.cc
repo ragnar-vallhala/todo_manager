@@ -1556,7 +1556,7 @@ class App
                     break;
                 case PickFor::File:
                     if (static_cast<size_t>(id) < pickFiles_.size())
-                        openAttachment(pickFiles_[static_cast<size_t>(id)]);
+                        openFromList(pickFiles_, static_cast<size_t>(id));
                     break;
                 case PickFor::Theme:
                     if (!saveThemeChoice(theme_.name))
@@ -1611,7 +1611,7 @@ class App
                 else if (!handleMention(k))
                     handleInput(k);
                 break;
-            case Mode::ViewFile: closeView(); break;  // any key
+            case Mode::ViewFile: handleView(k); break;
             case Mode::Search: handleSearch(k); break;
             case Mode::Pick: handlePick(k); break;
             case Mode::ConfirmDeleteTodo:
@@ -2398,7 +2398,7 @@ class App
                                                : "No attachments on this todo",
                          true);
         if (pickFiles_.size() == 1)
-            return openAttachment(pickFiles_[0]);
+            return openFromList(pickFiles_, 0);
         pickFor_ = PickFor::File;
         pickOptions_.clear();
         for (size_t i = 0; i < pickFiles_.size(); ++i)
@@ -2509,6 +2509,40 @@ class App
             out += "\033_Ga=p," + place + "\033\\";
         term.write(out);
         viewPlaced_ = true;
+    }
+
+    // Opens files[i], remembering the images around it so the viewer can
+    // step through them.
+    void openFromList(const std::vector<AttachmentItem> &files, size_t i)
+    {
+        viewList_.clear();
+        viewAt_ = 0;
+        for (size_t j = 0; j < files.size(); ++j)
+            if (files[j].image())
+            {
+                if (j == i)
+                    viewAt_ = viewList_.size();
+                viewList_.push_back(files[j]);
+            }
+        openAttachment(files[i]);
+    }
+
+    // In the image viewer: up steps to the older image, down to the newer
+    // one (the list runs newest first, as the log reads upwards); any other
+    // key closes it.
+    void handleView(const Key &k)
+    {
+        const bool up = k.type == Key::Up, down = k.type == Key::Down;
+        if (!up && !down)
+            return closeView();
+        const size_t next = up ? viewAt_ + 1 : viewAt_ - 1;
+        if ((up && next >= viewList_.size()) || (down && viewAt_ == 0))
+            return flash(up ? "No older image" : "No newer image", false);
+        term_->write("\033_Ga=d,d=I,i=" + std::to_string(kImageId) + ",q=2\033\\");
+        lastFrame_.clear();
+        viewAt_ = next;
+        mode_ = Mode::Normal;  // back to ViewFile if it can be shown inline
+        openAttachment(viewList_[viewAt_]);
     }
 
     void closeView()
@@ -3459,7 +3493,10 @@ class App
         const std::string dims = std::to_string(viewW_) + "x" + std::to_string(viewH_);
         const int w = W - 2, h = H - 2;
         auto [x, y] = popup(W, H, w, h, viewFile_.name + " · " + dims + " · " + viewFile_.label(),
-                            " any key closes ");
+                            viewList_.size() > 1
+                                ? " " + std::to_string(viewAt_ + 1) + "/" + std::to_string(viewList_.size()) +
+                                      " · up older · down newer · any other key closes "
+                                : " any key closes ");
         viewBox_ = {x + 2, y + 1, w - 4, h - 2};
     }
 
@@ -3524,6 +3561,8 @@ class App
     int mentionSel_{0};             // the highlighted "@name" suggestion
     std::vector<AttachmentItem> logFiles_;   // those of the messages drawn in the log
     std::vector<AttachmentItem> pickFiles_;  // what PickFor::File picks from
+    std::vector<AttachmentItem> viewList_;  // the images the viewer steps through, newest first
+    size_t viewAt_{0};                      // which of them is shown
     std::vector<std::string> pendingFiles_;  // paths to attach to the post
     std::string offerPath_;   // a file the post box offers to attach ("" for none)
     std::string offerPaste_;  // the paste it came from, put in if turned down
