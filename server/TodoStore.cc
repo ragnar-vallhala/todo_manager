@@ -113,6 +113,7 @@ Json::Value Attachment::toJson() const
     v["id"] = id;
     v["name"] = name;
     v["type"] = type;
+    v["kind"] = type.rfind("image/", 0) == 0 ? "image" : type.rfind("video/", 0) == 0 ? "video" : "document";
     v["size"] = static_cast<Json::Int64>(size);
     if (width && height)
     {

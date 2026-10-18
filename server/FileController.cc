@@ -14,7 +14,8 @@ using http::json;
 
 // POST /api/files  -- the file as multipart/form-data (field "file"), or as
 // the raw body with ?name=NAME (or an X-Filename header). PNG, JPEG, GIF,
-// WebP or PDF up to 10 MB, or MP4 or WebM video up to 50 MB. 201 → {"id", "name", "type", "size",
+// WebP up to 10 MB, MP4 or WebM video up to 50 MB, or any other file (a
+// "document") up to 200 MB. 201 → {"id", "name", "type", "kind", "size",
 // "width"?, "height"?}; the same bytes always get the same id.
 void FileController::upload(const HttpRequestPtr &req, Callback &&cb)
 {
@@ -61,7 +62,10 @@ void FileController::download(const HttpRequestPtr &req, Callback &&cb, const st
         return cb(error(404, "file not found"));
     char head[16] = {};
     in.read(head, sizeof(head));
-    const std::string type = files::sniff(std::string_view(head, static_cast<size_t>(in.gcount())));
+    std::string type = files::sniff(std::string_view(head, static_cast<size_t>(in.gcount())));
+    const bool document = files::kindOf(type) == "document";
+    if (type.empty())
+        type = files::typeForName(req->getParameter("name"));
 
     // One byte range ("bytes=A-B", "bytes=A-" or "bytes=-N"), so players can
     // seek and stream; anything else gets the whole file.
@@ -107,15 +111,21 @@ void FileController::download(const HttpRequestPtr &req, Callback &&cb, const st
                         : HttpResponse::newFileResponse(path, "", CT_CUSTOM, type, req);
     resp->addHeader("Accept-Ranges", "bytes");
     const auto name = req->getParameter("name");
-    const bool save = req->getParameter("download") == "1";
+    // Documents are only ever downloaded, never shown, so an uploaded .html
+    // or .svg can't run in our origin.
+    const bool save = document || req->getParameter("download") == "1";
     if (!name.empty() || save)
     {
         // RFC 5987 wants %20 for spaces, not "+" (a real "+" comes out as %2B).
-        std::string encoded = drogon::utils::urlEncodeComponent(files::cleanName(name, type));
-        for (size_t p; (p = encoded.find('+')) != std::string::npos;)
-            encoded.replace(p, 1, "%20");
-        resp->addHeader("Content-Disposition",
-                        std::string(save ? "attachment" : "inline") + "; filename*=UTF-8''" + encoded);
+        std::string disposition = save ? "attachment" : "inline";
+        if (!name.empty())
+        {
+            std::string encoded = drogon::utils::urlEncodeComponent(files::cleanName(name, type));
+            for (size_t p; (p = encoded.find('+')) != std::string::npos;)
+                encoded.replace(p, 1, "%20");
+            disposition += "; filename*=UTF-8''" + encoded;
+        }
+        resp->addHeader("Content-Disposition", disposition);
     }
     // The id is the content's hash, so it never changes.
     resp->addHeader("Cache-Control", "public, max-age=31536000, immutable");
