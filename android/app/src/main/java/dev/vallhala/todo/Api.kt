@@ -60,6 +60,22 @@ data class Attachment(
 /** An attachment in a room's log, with the message it's on. */
 data class RoomFile(val attachment: Attachment, val messageId: Long, val seq: Long, val author: String, val createdAt: Long)
 
+/** One Claude session in a device's usage report. */
+data class UsageSession(val name: String, val project: String, val idx30m: Double, val idxWindow: Double)
+
+/** The latest usage report of one device; percentages and reset times are null when unknown. */
+data class UsageDevice(
+    val device: String,
+    val fiveHourPct: Double?,
+    val fiveHourResetsAt: Long?,
+    val sevenDayPct: Double?,
+    val sevenDayResetsAt: Long?,
+    val received: Long,
+    val sessions: List<UsageSession>,
+)
+
+data class Usage(val now: Long, val devices: List<UsageDevice>)
+
 data class CatStyle(
     val fg: String? = null,
     val bg: String? = null,
@@ -250,6 +266,21 @@ class Api(baseUrl: String, private val agent: String) {
     private suspend fun obj(method: String, path: String, json: JSONObject? = null) = JSONObject(call(method, path, json))
     private suspend fun arr(path: String, query: Map<String, String> = emptyMap(), client: OkHttpClient = http, anonymous: Boolean = false) =
         JSONArray(call("GET", path, query = query, client = client, anonymous = anonymous))
+
+    // Usage
+    suspend fun usage(): Usage {
+        val o = JSONObject(call("GET", "api/usage"))
+        fun JSONObject.dbl(k: String) = if (has(k) && !isNull(k)) optDouble(k) else null
+        return Usage(o.optLong("now"), (o.optJSONArray("devices") ?: JSONArray()).map { d ->
+            UsageDevice(
+                d.optString("device"), d.dbl("five_hour_pct"), d.dbl("five_hour_resets_at")?.toLong(),
+                d.dbl("seven_day_pct"), d.dbl("seven_day_resets_at")?.toLong(), d.optLong("received"),
+                (d.optJSONArray("sessions") ?: JSONArray()).map { s ->
+                    UsageSession(s.optString("name"), s.optString("project"), s.optDouble("idx_30m", 0.0), s.optDouble("idx_window", 0.0))
+                },
+            )
+        })
+    }
 
     // Todos
     suspend fun todos() = arr("api/todos", mapOf("status" to "all", "archived" to "1")).map(::todoOf)

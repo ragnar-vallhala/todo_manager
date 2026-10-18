@@ -131,6 +131,7 @@ sealed interface AppDialog {
     data class DeleteAllPrunedMessages(val roomId: Int) : AppDialog
     data object Theme : AppDialog
     data object Settings : AppDialog
+    data object Usage : AppDialog
 }
 
 @Composable
@@ -257,6 +258,7 @@ fun App(model: AppModel) {
         ) { close(); model.deleteAllPrunedMessages(d.roomId) }
         AppDialog.Theme -> ThemeDialog(model.themes, model.themeName, close) { model.setTheme(it) }
         AppDialog.Settings -> SettingsDialog(model, first = false, onDismiss = close)
+        AppDialog.Usage -> UsageDialog(pollUsage(model).value, close)
     }
 }
 
@@ -271,6 +273,7 @@ private fun Home(model: AppModel, open: (AppDialog) -> Unit, onOpen: (Todo) -> U
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var adding by remember { mutableStateOf(false) }
+    val usage by pollUsage(model)
     val todoList = rememberLazyListState()
     val barState = rememberTopAppBarState()
     val scroll = TopAppBarDefaults.enterAlwaysScrollBehavior(barState)
@@ -300,6 +303,7 @@ private fun Home(model: AppModel, open: (AppDialog) -> Unit, onOpen: (Todo) -> U
                         Column {
                             Text(title(model), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             OfflineLine(model)
+                            UsageStrip(usage)
                         }
                     },
                     navigationIcon = { IconButton(onClick = { scope.launch { drawer.open() } }) { Icon(Icons.Default.Menu, "Menu") } },
@@ -311,6 +315,7 @@ private fun Home(model: AppModel, open: (AppDialog) -> Unit, onOpen: (Todo) -> U
                         else Column {
                             Text("Chats")
                             OfflineLine(model)
+                            UsageStrip(usage)
                         }
                     },
                     navigationIcon = {
@@ -437,6 +442,7 @@ private fun TodoOverflow(model: AppModel, open: (AppDialog) -> Unit) {
         }
         if (model.view != View.Pruned) item("Prune done") { model.pruneDone() }
         item("Refresh") { model.refresh() }
+        item("Claude usage…") { open(AppDialog.Usage) }
         item("Theme…") { open(AppDialog.Theme) }
         item("Settings…") { open(AppDialog.Settings) }
     }
@@ -451,6 +457,7 @@ private fun ChatOverflow(model: AppModel, open: (AppDialog) -> Unit) {
         DropdownMenuItem({ Text("Mark all as read") }, { shown = false; model.rooms.forEach { if (model.unread(it) > 0) model.markRead(it) } })
         DropdownMenuItem({ Text("Refresh") }, { shown = false; model.refresh() })
         HorizontalDivider()
+        DropdownMenuItem({ Text("Claude usage…") }, { shown = false; open(AppDialog.Usage) })
         DropdownMenuItem({ Text("Theme…") }, { shown = false; open(AppDialog.Theme) })
         DropdownMenuItem({ Text("Settings…") }, { shown = false; open(AppDialog.Settings) })
     }
