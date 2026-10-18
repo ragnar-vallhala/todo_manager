@@ -237,6 +237,7 @@ inline const std::vector<Action> &actions()
         {"hide_done", "H", "General", "hide / show completed"},
         {"prune_done", "C", "General", "prune all done todos (frees their ids)"},
         {"theme", "T", "General", "pick a color theme"},
+        {"usage", "U", "General", "Claude usage per device and session"},
         {"refresh", "R ctrl+r", "General", "refresh now"},
 
         {"focus_next", "tab", "Panels", "next panel"},

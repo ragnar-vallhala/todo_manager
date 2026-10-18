@@ -2,6 +2,7 @@
 #include "Tui.h"
 #include "Api.h"
 #include "Keys.h"
+#include "Usage.h"
 #include "Theme.h"
 
 #include <drogon/utils/Utilities.h>
@@ -1010,6 +1011,7 @@ enum class Mode
     ConfirmPruneLog,
     ConfirmClear,
     Help,
+    Usage,
     ViewFile,  // an image shown over the UI (kitty only)
 };
 enum class Focus { Categories, Todos, Details };
@@ -1082,6 +1084,7 @@ class App
         loadKeys();
         loadLayout();
         reload();
+        loadUsage();
         while (!quit_ && !term.eof())
         {
             draw(term);
@@ -1090,6 +1093,9 @@ class App
                 handle(k);
             else if (mode_ == Mode::Normal && Clock::now() - lastLoad_ > std::chrono::seconds(2))
                 reload();  // pick up changes from the web UI / other clients
+            if ((mode_ == Mode::Normal || mode_ == Mode::Usage) &&
+                Clock::now() - lastUsage_ > std::chrono::seconds(30))
+                loadUsage();
         }
         return 0;
     }
@@ -1125,6 +1131,19 @@ class App
             online_ = !e.offline;
         }
         syncSelection();
+    }
+
+    // Claude usage from all devices; a failure keeps what we had.
+    void loadUsage()
+    {
+        lastUsage_ = Clock::now();
+        try
+        {
+            usage_ = api_.usage();
+        }
+        catch (const std::exception &)
+        {
+        }
     }
 
     // Loads the log of the room being viewed: all of it (the last 200) when
@@ -1606,6 +1625,12 @@ class App
                 else
                     mode_ = Mode::Normal;
                 break;
+            case Mode::Usage:
+                if (keys_.is(k, "refresh"))
+                    loadUsage();
+                else
+                    mode_ = Mode::Normal;
+                break;
             case Mode::AddTodo:
             case Mode::EditTodo:
             case Mode::AddCategory:
@@ -1664,6 +1689,11 @@ class App
         {
             helpOffset_ = 0;
             mode_ = Mode::Help;
+        }
+        else if (on("usage"))
+        {
+            loadUsage();
+            mode_ = Mode::Usage;
         }
         else if (on("focus_next"))
             cycle(1);
@@ -2724,8 +2754,9 @@ class App
 
             if (wide_)
             {
-                drawStatus(0, 0, left, 4);
-                drawCategories(0, 4, left, main - 4);
+                const int sh = main >= 20 ? 6 : 4;  // room for the usage lines
+                drawStatus(0, 0, left, sh);
+                drawCategories(0, sh, left, main - sh);
                 drawDetails(left, main - details, W - left, details);
             }
             drawTodos(left, 0, W - left, main - details);
@@ -2750,6 +2781,7 @@ class App
                 case Mode::ConfirmClear: drawConfirmPopup(W, H); break;
                 case Mode::Pick: drawPickPopup(W, H); break;
                 case Mode::Help: drawHelpPopup(W, H); break;
+                case Mode::Usage: drawUsagePopup(W, H); break;
                 case Mode::ViewFile: drawViewPopup(W, H); break;
                 default: break;
             }
@@ -2782,6 +2814,53 @@ class App
         if (auto p = host.find("://"); p != std::string::npos)
             host = host.substr(p + 3);
         c_.text(x + 2, y + 2, truncate(host, w - 4), muted());
+        if (h >= 6)
+        {
+            // 5h and 7d plan usage on one line, the busiest sessions under it.
+            const auto segs = cuse::line(usage_, cuse::nowSec(), 2);
+            int e = x + 2;
+            for (size_t i = 0; i < segs.size(); ++i)
+            {
+                if (segs[i].text == " | ")
+                    e = i == 1 ? c_.text(e, y + 3, "  ", Style()) : e;
+                else if (segs[i].text.rfind("top: ", 0) == 0)
+                    c_.text(x + 2, y + 4, truncate(segs[i].text, w - 4), usageStyle(segs[i].level), x + w - 1);
+                else
+                    e = c_.text(e, y + 3, truncate(segs[i].text, x + w - 2 - e), usageStyle(segs[i].level), x + w - 1);
+            }
+        }
+    }
+
+    Style usageStyle(cuse::Level l) const
+    {
+        switch (l)
+        {
+            case cuse::Level::Ok: return Style(theme_.success);
+            case cuse::Level::Warn: return Style(theme_.pending);
+            case cuse::Level::Bad: return Style(theme_.error, Default, Bold);
+            default: return muted();
+        }
+    }
+
+    void drawUsagePopup(int W, int H)
+    {
+        const double now = cuse::nowSec();
+        const auto rows = cuse::table(usage_, now);
+        auto lines = cuse::layout(rows, 30);
+        const int w = std::min(W - 4, 100);
+        const int h = std::min(H - 2, static_cast<int>(rows.size()) + 5);
+        auto [x, y] = popup(W, H, w, h, "Claude usage",
+                            " " + keys_.labels("refresh", 1) + " refresh · any other key closes ");
+        int e = x + 2;
+        for (const auto &sg : cuse::line(usage_, now, 3))
+            e = c_.text(e, y + 1, sg.text, usageStyle(sg.level), x + w - 1);
+        for (int i = 0; i < h - 4 && i < static_cast<int>(rows.size()); ++i)
+        {
+            const auto &r = rows[static_cast<size_t>(i)];
+            Style st = r.header ? Style(Default, Default, Bold)
+                                : r.cells[0].empty() ? Style() : usageStyle(r.level);
+            c_.text(x + 2, y + 3 + i, lines[static_cast<size_t>(i)], st, x + w - 1);
+        }
     }
 
     void drawCategories(int x, int y, int w, int h)
@@ -3591,6 +3670,8 @@ class App
     CategoryTree tree_;
     bool online_{true};
     Clock::time_point lastLoad_{};
+    Clock::time_point lastUsage_{};
+    Json::Value usage_;
 
     Mode mode_{Mode::Normal};
     Focus focus_{Focus::Todos};

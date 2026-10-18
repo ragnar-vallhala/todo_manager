@@ -218,6 +218,9 @@ class Api
 
     // ── rooms ──
 
+    // Claude usage reports from all devices (see Usage.h).
+    Json::Value usage() { return send(drogon::Get, "/api/usage"); }
+
     std::vector<RoomItem> rooms()
     {
         std::vector<RoomItem> out;

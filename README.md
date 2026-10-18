@@ -448,3 +448,16 @@ the log knows to load it again. Messages have `kind` `"message"` or `"event"`
 Errors return `{"error": "..."}` with a 4xx status. The data file holds
 `{"todos": [...], "categories": [...], "pruned": [...], "rooms": [...], "messages": [...], "prunedMessages": [...]}`; older files (a bare array of todos) load fine.
 Attachments are stored as `files/ID` next to it.
+
+## Claude usage
+
+`todo usage` and the UI (status panel, and `U` for the full table) show the
+Claude plan's 5-hour and 7-day usage plus a per-device, per-session token
+index (input x1, output x5, cache-write x1.25, cache-read x0.1). Colours turn
+yellow at 70% and red at 90%.
+
+Nothing here calls a model. The status line script writes the plan limits to
+`~/.claude/usage-status.json`; `tools/usage-collector.py` (one per machine,
+every 60 s) adds a summary of the local session transcripts and POSTs it to
+`/api/usage`. The server keeps only the latest report per device, in memory.
+Install the collector with `tools/install-usage-collector.sh DEVICE`.
