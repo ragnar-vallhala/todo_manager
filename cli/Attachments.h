@@ -6,6 +6,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -23,12 +24,30 @@ struct AttachmentItem
 
     bool image() const { return type.rfind("image/", 0) == 0; }
     bool video() const { return type.rfind("video/", 0) == 0; }
+    bool document() const { return !image() && !video(); }  // PDFs, archives, APKs, anything else
     std::string label() const { return "f" + id; }
 
+    // "512 B", "3.4 KB", "12 MB", "1.2 GB".
+    static std::string sizeLabel(int64_t n)
+    {
+        char buf[32];
+        if (n < 1024)
+            std::snprintf(buf, sizeof buf, "%lld B", static_cast<long long>(n));
+        else if (n < 1024 * 1024)
+            std::snprintf(buf, sizeof buf, "%.1f KB", static_cast<double>(n) / 1024);
+        else if (n < 1024LL * 1024 * 1024)
+            std::snprintf(buf, sizeof buf, "%.1f MB", static_cast<double>(n) / (1024 * 1024));
+        else
+            std::snprintf(buf, sizeof buf, "%.2f GB", static_cast<double>(n) / (1024.0 * 1024 * 1024));
+        return buf;
+    }
+
     // "[image: shot.png 800x600, f1a2b3c4d5e6]", "[video: run.mp4 1280x720 0:42, f...]"
-    // or "[file: notes.pdf, f...]".
+    // or "[doc] notes.pdf (1.2 MB, f...)".
     std::string marker() const
     {
+        if (document())
+            return "[doc] " + name + " (" + sizeLabel(size) + ", " + label() + ")";
         std::string dims = width && height ? " " + std::to_string(width) + "x" + std::to_string(height) : "";
         if (duration > 0)
         {
@@ -36,7 +55,7 @@ struct AttachmentItem
             const std::string sec = std::to_string(s % 60);
             dims += " " + std::to_string(s / 60) + ":" + (sec.size() < 2 ? "0" : "") + sec;
         }
-        return std::string("[") + (image() ? "image: " : video() ? "video: " : "file: ") + name + dims + ", " +
+        return std::string("[") + (image() ? "image: " : "video: ") + name + dims + ", " +
                label() + "]";
     }
 
@@ -71,23 +90,33 @@ struct AttachmentItem
 
 namespace attach
 {
-constexpr int64_t kMaxSize = 10 * 1024 * 1024;       // the server's limit for images and PDFs
-constexpr int64_t kMaxVideoSize = 50 * 1024 * 1024;  // and for videos
+constexpr int64_t kMaxSize = 10 * 1024 * 1024;           // the server's limit for images
+constexpr int64_t kMaxVideoSize = 50 * 1024 * 1024;      // for videos
+constexpr int64_t kMaxDocumentSize = 200 * 1024 * 1024;  // and for everything else
 
-// The most the server takes of a file of `type`.
+// The most the server takes of a file of `type` ("" for a document).
 inline int64_t maxFor(const std::string &type)
 {
-    return type.rfind("video/", 0) == 0 ? kMaxVideoSize : kMaxSize;
+    return type.rfind("video/", 0) == 0   ? kMaxVideoSize
+           : type.rfind("image/", 0) == 0 ? kMaxSize
+                                          : kMaxDocumentSize;
 }
 
-// "10 MB" or "50 MB".
+// "10 MB", "50 MB" or "200 MB".
 inline std::string maxLabel(const std::string &type)
 {
     return std::to_string(maxFor(type) / (1024 * 1024)) + " MB";
 }
 
-// The type of file `path` by its first bytes, as the server judges it: one of
-// the types it takes, or "" (also when it can't be read or isn't a file).
+// The type of file `path` by its first bytes, as the server judges it: an
+// image, video or PDF type, or "" (a document of some other kind, or not
+// readable / not a file: see isFile).
+inline bool isFile(const std::string &path)
+{
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
 inline std::string sniff(const std::string &path)
 {
     struct stat st{};
@@ -119,6 +148,14 @@ inline std::string sniff(const std::string &path)
     if (h.rfind("\x1A\x45\xDF\xA3", 0) == 0 && h.find("webm") != std::string::npos)
         return "video/webm";
     return "";
+}
+
+// Whether to offer to attach `path` when it shows up in a pasted or typed
+// message: a regular file that is a known image/video/PDF, or any other
+// file given with a folder in its path (a bare word like "Makefile" isn't).
+inline bool offerable(const std::string &path)
+{
+    return isFile(path) && (!sniff(path).empty() || path.find('/') != std::string::npos);
 }
 
 // A path as pasted or dropped into a terminal: 'quoted', "quoted", with
