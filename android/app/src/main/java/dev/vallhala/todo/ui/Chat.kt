@@ -68,7 +68,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.TaskAlt
@@ -752,7 +752,7 @@ private fun MessageBubble(
             for (a in files) {
                 FileCard(
                     a.name,
-                    "${if (a.isPdf) "PDF" else a.type.substringAfter('/').uppercase()} · ${sizeLabel(a.size)}",
+                    "${dev.vallhala.todo.docKind(a.name, a.type)} · ${sizeLabel(a.size)}",
                     busy = model.fetching == a.id,
                     container = onBubble.copy(alpha = 0.07f),
                     content = onBubble,
@@ -822,7 +822,7 @@ private fun SendingBubble(model: AppModel, o: Outgoing, first: Boolean, maxBubbl
                 )
             }
             for (d in files) {
-                FileCard(d.name, "PDF · ${sizeLabel(d.size)}", busy = false, container = extra.onMine.copy(alpha = 0.07f), content = extra.onMine, modifier = Modifier.padding(4.dp))
+                FileCard(d.name, "${dev.vallhala.todo.docKind(d.name, d.type)} · ${sizeLabel(d.size)}", busy = false, container = extra.onMine.copy(alpha = 0.07f), content = extra.onMine, modifier = Modifier.padding(4.dp))
             }
             if (o.drafts.isNotEmpty() && failed == null) {
                 LinearProgressIndicator(
@@ -899,7 +899,7 @@ private fun Composer(model: AppModel, room: Room) {
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(AppModel.MAX_FILES)) { uris ->
         model.addDrafts(room.id, uris)
     }
-    val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         model.addDrafts(room.id, uris)
     }
     var cameraFile by rememberSaveable { mutableStateOf<String?>(null) }
@@ -982,7 +982,7 @@ private fun Composer(model: AppModel, room: Room) {
                     }
                     AttachOption(Icons.Default.PhotoCamera, "Camera", Color(0xFFD9467A)) { attach = false; camera() }
                     AttachOption(Icons.Default.Videocam, "Video", Color(0xFFE07A2E)) { attach = false; camera(video = true) }
-                    AttachOption(Icons.Default.PictureAsPdf, "PDF", Color(0xFF5468D8)) { attach = false; pickPdf.launch(arrayOf("application/pdf")) }
+                    AttachOption(Icons.Default.AttachFile, "File", Color(0xFF5468D8)) { attach = false; pickFile.launch(arrayOf("*/*")) }
                 }
             }
         }
@@ -1079,7 +1079,7 @@ private fun DraftTray(model: AppModel, roomId: Int, drafts: List<Draft>, onAdd: 
                 } else {
                     Surface(Modifier.fillMaxSize(), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                         Column(Modifier.padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                            Icon(Icons.Default.PictureAsPdf, null, tint = Color(0xFFE5483A))
+                            Icon(Icons.Default.Description, null, tint = Color(0xFF5468D8))
                             Text(d.name, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(sizeLabel(d.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

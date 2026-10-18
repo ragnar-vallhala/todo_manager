@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -269,7 +270,8 @@ const char *extension(const std::string &type)
            : type == "image/webp" ? ".webp"
            : type == "video/mp4"  ? ".mp4"
            : type == "video/webm" ? ".webm"
-                                  : ".pdf";
+           : type == "application/pdf" ? ".pdf"
+                                  : "";
 }
 
 Attachment describe(const std::string &id, std::string_view data, const std::string &name)
@@ -278,6 +280,8 @@ Attachment describe(const std::string &id, std::string_view data, const std::str
     a.id = id;
     a.type = files::sniff(data);
     a.name = files::cleanName(name, a.type);
+    if (a.type.empty())
+        a.type = files::typeForName(a.name);
     a.size = static_cast<int64_t>(data.size());
     if (files::isVideo(a.type))
     {
@@ -331,6 +335,32 @@ std::string sniff(std::string_view d)
     return "";
 }
 
+std::string kindOf(const std::string &type)
+{
+    return type.rfind("image/", 0) == 0 ? "image" : isVideo(type) ? "video" : "document";
+}
+
+std::string typeForName(const std::string &name)
+{
+    const auto dot = name.rfind('.');
+    if (dot == std::string::npos)
+        return "application/octet-stream";
+    static const std::map<std::string, std::string> types = {
+        {"txt", "text/plain"}, {"log", "text/plain"}, {"md", "text/markdown"}, {"csv", "text/csv"},
+        {"json", "application/json"}, {"zip", "application/zip"}, {"gz", "application/gzip"},
+        {"tar", "application/x-tar"}, {"7z", "application/x-7z-compressed"},
+        {"apk", "application/vnd.android.package-archive"}, {"pdf", "application/pdf"},
+        {"doc", "application/msword"}, {"xls", "application/vnd.ms-excel"}, {"ppt", "application/vnd.ms-powerpoint"},
+        {"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        {"xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+        {"pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+        {"odt", "application/vnd.oasis.opendocument.text"}, {"mp3", "audio/mpeg"}, {"wav", "audio/wav"},
+        {"ogg", "audio/ogg"}, {"flac", "audio/flac"}, {"m4a", "audio/mp4"}, {"mov", "video/quicktime"},
+        {"mkv", "video/x-matroska"}};
+    const auto it = types.find(lower(name.substr(dot + 1)));
+    return it == types.end() ? "application/octet-stream" : it->second;
+}
+
 std::string cleanName(const std::string &name, const std::string &type)
 {
     std::string base = name.substr(name.find_last_of("/\\") + 1);
@@ -355,15 +385,15 @@ std::string cleanName(const std::string &name, const std::string &type)
 
 Attachment store(std::string_view data, const std::string &name)
 {
-    if (data.size() > kMaxVideoSize)
-        throw StoreError(413, "files can be at most 50 MB (videos) or 10 MB (images and PDFs)");
+    if (data.size() > kMaxDocumentSize)
+        throw StoreError(413, "files can be at most 200 MB (50 MB for videos, 10 MB for images)");
     if (data.empty())
         throw StoreError(400, "the file is empty");
     const auto type = sniff(data);
-    if (type.empty())
-        throw StoreError(400, "only PNG, JPEG, GIF, WebP, PDF, MP4 and WebM files can be attached");
-    if (!isVideo(type) && data.size() > kMaxSize)
-        throw StoreError(413, "images and PDFs can be at most 10 MB");
+    if (isVideo(type) && data.size() > kMaxVideoSize)
+        throw StoreError(413, "videos can be at most 50 MB");
+    if (type.rfind("image/", 0) == 0 && data.size() > kMaxSize)
+        throw StoreError(413, "images can be at most 10 MB");
 
     const std::string id = lower(drogon::utils::getSha256(data.data(), data.size())).substr(0, kIdLength);
     const std::string path = pathOf(id);

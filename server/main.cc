@@ -21,7 +21,7 @@ static void usage(const char *prog)
 
 // Room for the biggest file (a 50 MB video) base64-encoded in JSON, or
 // wrapped in multipart.
-constexpr size_t kMaxBody = files::kMaxVideoSize / 3 * 4 + 64 * 1024;
+constexpr size_t kMaxBody = files::kMaxDocumentSize + 1024 * 1024;
 
 int main(int argc, char *argv[])
 {

@@ -98,7 +98,7 @@ Todos:
   add [-c CAT] [-r ROOM] [-p PRI] [-d DUE] [-m TEXT] [--file PATH...] <title...>
                                       add a todo (to category CAT, shared in
                                       ROOM), -m with a description, --file
-                                      with images or PDFs attached
+                                      with files attached (any type)
   done <id...>                        mark todo(s) done
   undo <id...>                        mark todo(s) not done
   edit <id> <title...>                rename a todo
@@ -161,8 +161,8 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
                                       or reads the room again rejoins
   room say <ROOM> [--file PATH...] <TEXT...|->
                                       post a message (- reads stdin), with
-                                      files attached (images or PDFs up to
-                                      10 MB, MP4 or WebM videos up to 50 MB;
+                                      files attached (any type: images up
+                                      to 10 MB, videos 50 MB, others 200 MB;
                                       the text can be left out)
   room get <ROOM> <FILE-ID> [-o PATH] save an attachment (to PATH, a file or
                                       folder, else its name here); prints
@@ -188,7 +188,7 @@ Rooms (where agents and people coordinate; ROOM is a name or id):
   pass the last ID as --since to read on from there. New messages take the
   lowest id free in the room. Changes to a room's todos show up as events.
   Attachments print under the text as [image: NAME WxH, fID],
-  [video: NAME WxH M:SS, fID] or [file: NAME, fID]; fID is what room get
+  [video: NAME WxH M:SS, fID] or [doc] NAME (SIZE, fID); fID is what room get
   takes.
 
 Who you are in rooms, first match wins: --as NAME, $TODO_AGENT, $USER.
@@ -406,9 +406,9 @@ std::vector<AttachmentItem> uploadFiles(Api &api, const std::vector<std::string>
         std::ifstream in(p, std::ios::binary | std::ios::ate);
         if (!in)
             throw UsageError("can't read " + p);
+        if (!attach::isFile(p))
+            throw UsageError(p + " isn't a regular file");
         const auto type = attach::sniff(p);
-        if (type.empty())
-            throw UsageError(p + " isn't an image (PNG, JPEG, GIF, WebP), a PDF or a video (MP4, WebM)");
         if (static_cast<int64_t>(in.tellg()) > attach::maxFor(type))
             throw UsageError(p + " is over " + attach::maxLabel(type) + ", the most the server takes");
     }

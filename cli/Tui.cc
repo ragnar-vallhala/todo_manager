@@ -2175,7 +2175,7 @@ class App
         }
         if (k.type == Key::Paste)
         {
-            // A pasted (or dropped) path to an image or PDF: offer to attach it.
+            // A pasted (or dropped) path to a file: offer to attach it.
             if (mode_ == Mode::PostMessage && offerFile(attach::pathFromText(k.ch), k.ch, ""))
                 return;
             input_.paste(k.ch, mode_ == Mode::PostMessage);  // only messages keep line breaks
@@ -2197,7 +2197,7 @@ class App
             input_.handle(k);
             return;
         }
-        // A typed path to an image or PDF: offer to attach it before posting.
+        // A typed path to a file: offer to attach it before posting.
         if (mode_ == Mode::PostMessage && offerTyped())
             return;
         std::string text = trim(input_.text());
@@ -2354,7 +2354,7 @@ class App
     // attached. True if it's offered.
     bool offerFile(const std::string &path, const std::string &paste, const std::string &token)
     {
-        if (path.empty() || declined_.count(path) || attach::sniff(path).empty() ||
+        if (path.empty() || declined_.count(path) || !attach::offerable(path) ||
             std::find(pendingFiles_.begin(), pendingFiles_.end(), path) != pendingFiles_.end())
             return false;
         offerPath_ = path;
@@ -2478,6 +2478,19 @@ class App
             out.write(data.data(), static_cast<std::streamsize>(data.size()));
             if (!out)
                 return flash("Couldn't save " + path.string(), true);
+        }
+        if (a.document())
+        {
+            // Never run or open a document: just put it in ~/Downloads.
+            const char *home = std::getenv("HOME");
+            fs::path out = fs::path(home ? home : ".") / "Downloads";
+            fs::create_directories(out, ec);
+            const fs::path name = path.filename();
+            fs::path dest = out / name;
+            for (int n = 1; fs::exists(dest, ec); ++n)
+                dest = out / (name.stem().string() + "-" + std::to_string(n) + name.extension().string());
+            fs::copy_file(path, dest, ec);
+            return ec ? flash("Couldn't save to " + dest.string(), true) : flash("Saved to " + dest.string(), false);
         }
         if (a.image() && inKitty() && showInline(a, path))
             return;
@@ -3455,7 +3468,7 @@ class App
             std::error_code ec;
             const auto size = std::filesystem::file_size(offerPath_, ec);
             c_.text(x + 2, line, truncate("Attach " + attach::baseName(offerPath_) + " (" +
-                                              attach::sniff(offerPath_) + ", " +
+                                              (attach::sniff(offerPath_).empty() ? std::string("file") : attach::sniff(offerPath_)) + ", " +
                                               sizeLabel(ec ? 0 : static_cast<int64_t>(size)) + ")?",
                                           w - 4),
                     Style(theme_.pending, Default, Bold), x + w - 1);

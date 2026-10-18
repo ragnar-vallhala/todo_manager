@@ -37,15 +37,18 @@ data class Draft(
     val isImage get() = type.startsWith("image/")
     val isVideo get() = type.startsWith("video/")
     val isMedia get() = isImage || isVideo
+    /** Anything that isn't an image or a video: PDFs, archives, APKs... */
+    val isDocument get() = !isMedia
 }
 
 /** Something the user should be told, such as a file too big to send. */
 class MediaException(message: String) : Exception(message)
 
 object Media {
-    /** The server's limit per file: images and PDFs, then videos. */
+    /** The server's limit per file: images, then videos, then everything else. */
     const val MAX_SIZE = 10L * 1024 * 1024
     const val MAX_VIDEO_SIZE = 50L * 1024 * 1024
+    const val MAX_DOCUMENT_SIZE = 200L * 1024 * 1024
     /** Photos bigger than this, or from the camera, are shrunk and sent as JPEG. */
     private const val RECOMPRESS_OVER = 2L * 1024 * 1024
     /** The long edge of a shrunk photo. */
@@ -101,8 +104,8 @@ object Media {
         val cr = ctx.contentResolver
         val name = displayName(ctx, uri)?.takeIf { it.isNotBlank() } ?: "file"
         val declared = declaredSize(ctx, uri)
-        // Nothing the server takes is over 50 MB: don't copy a huge file just to refuse it.
-        if (declared != null && declared > MAX_VIDEO_SIZE) throw MediaException("$name is over 50 MB")
+        // Nothing the server takes is over 200 MB: don't copy a huge file just to refuse it.
+        if (declared != null && declared > MAX_DOCUMENT_SIZE) throw MediaException("$name is over 200 MB")
         val out = File(dir(ctx, "outgoing"), UUID.randomUUID().toString())
         cr.openInputStream(uri)?.use { input ->
             out.outputStream().use { o ->
@@ -112,7 +115,7 @@ object Media {
                     val n = input.read(buf)
                     if (n < 0) break
                     total += n
-                    if (total > MAX_VIDEO_SIZE) { o.close(); out.delete(); throw MediaException("$name is over 50 MB") }
+                    if (total > MAX_DOCUMENT_SIZE) { o.close(); out.delete(); throw MediaException("$name is over 200 MB") }
                     o.write(buf, 0, n)
                 }
             }
@@ -122,20 +125,13 @@ object Media {
         val mime = cr.getType(uri).orEmpty()
         val size = out.length()
         when {
-            sniffed == "application/pdf" -> {
-                if (size > MAX_SIZE) { out.delete(); throw MediaException("$name is over 10 MB") }
-                Draft(out, name, sniffed, size)
-            }
             sniffed == "video/mp4" || sniffed == "video/webm" -> {
+                if (size > MAX_VIDEO_SIZE) { out.delete(); throw MediaException("$name is over 50 MB") }
                 // With its extension, so the image loader knows to take a frame from it for the thumbnail.
                 val named = File(out.path + if (sniffed == "video/mp4") ".mp4" else ".webm")
                 val file = if (out.renameTo(named)) named else out
                 val (w, h, secs) = videoInfo(file)
                 Draft(file, name, sniffed, size, w, h, secs)
-            }
-            mime.startsWith("video/") -> {
-                out.delete()
-                throw MediaException("Only MP4 and WebM videos can be sent")
             }
             sniffed == "image/gif" -> {
                 if (size > MAX_SIZE) { out.delete(); throw MediaException("$name is over 10 MB") }
@@ -156,11 +152,17 @@ object Media {
                     Draft(jpeg, name.substringBeforeLast('.').ifBlank { "photo" } + ".jpg", "image/jpeg", jpeg.length(), w, h)
                 }
             }
-            else -> {
-                out.delete()
-                throw MediaException("Only images, videos and PDFs can be sent")
-            }
+            // Anything else is a document, sent as it is.
+            else -> Draft(out, name, sniffed ?: documentType(name, mime), size)
         }
+    }
+
+    /** A document's type: what the system says it is, else by its extension, else a plain download. */
+    fun documentType(name: String, mime: String): String {
+        if (mime.isNotBlank() && mime != "application/octet-stream" && !mime.startsWith("image/") && !mime.startsWith("video/")) return mime
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            ?.takeIf { !it.startsWith("image/") && !it.startsWith("video/") } ?: "application/octet-stream"
     }
 
     /** A video's size as shown (turned for portrait clips) and its length in seconds; zeros where unknown. */
@@ -241,12 +243,12 @@ object Media {
     private fun safeName(a: Attachment): String {
         val ext = when (a.type) {
             "image/png" -> "png"; "image/jpeg" -> "jpg"; "image/gif" -> "gif"; "image/webp" -> "webp"
-            "application/pdf" -> "pdf"; "video/mp4" -> "mp4"; "video/webm" -> "webm"; else -> "bin"
+            "application/pdf" -> "pdf"; "video/mp4" -> "mp4"; "video/webm" -> "webm"; else -> ""
         }
         val base = a.name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().take(120)
         return when {
-            base.isEmpty() -> "file.$ext"
-            base.contains('.') -> base
+            base.isEmpty() || base == "." || base == ".." -> if (ext.isEmpty()) "file" else "file.$ext"
+            base.contains('.') || ext.isEmpty() -> base
             else -> "$base.$ext"
         }
     }
@@ -259,14 +261,17 @@ object Media {
 
     private fun uriOf(ctx: Context, f: File) = FileProvider.getUriForFile(ctx, authority(ctx), f)
 
-    /** Opens a file with whatever app views its type (the system's PDF viewer, say). */
+    /**
+     * Offers a file to the apps that view its type, in the system chooser
+     * (nothing is opened or installed by us); if none does, the share chooser.
+     */
     fun open(ctx: Context, f: File, type: String) {
-        val i = Intent(Intent.ACTION_VIEW).setDataAndType(uriOf(ctx, f), type)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uriOf(ctx, f), type)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         try {
-            ctx.startActivity(i)
+            ctx.startActivity(Intent.createChooser(view, f.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (e: ActivityNotFoundException) {
-            throw MediaException("No app here can open ${if (type == "application/pdf") "PDFs" else "this file"}")
+            share(ctx, f, type)
         }
     }
 
@@ -312,6 +317,35 @@ object Media {
         }
     }
 
+    /** Copies a document into the Downloads folder (Android 10+; before that, the public Downloads folder). */
+    suspend fun saveToDownloads(ctx: Context, f: File, type: String) = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val cr = ctx.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+                put(MediaStore.MediaColumns.MIME_TYPE, type)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = cr.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                ?: throw IOException("Couldn't save to Downloads")
+            try {
+                cr.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } } ?: throw IOException("Couldn't save to Downloads")
+                cr.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            } catch (e: Exception) {
+                cr.delete(uri, null, null)
+                throw e
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
+            var dest = File(dir, f.name)
+            var n = 1
+            while (dest.exists()) dest = File(dir, "${f.nameWithoutExtension} (${n++}).${f.extension}")
+            f.copyTo(dest)
+        }
+    }
+
     /** Drops the copies made for sending once they're sent (or abandoned). */
     fun discard(drafts: List<Draft>) {
         for (d in drafts) runCatching { d.file.delete() }
@@ -327,8 +361,14 @@ fun durationLabel(seconds: Double): String {
     return if (h > 0) String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s) else String.format(java.util.Locale.US, "%d:%02d", m, s)
 }
 
+/** "PDF", "APK", "ZIP": a document's kind for its card, from its name, else its type. */
+fun docKind(name: String, type: String): String =
+    name.substringAfterLast('.', "").takeIf { it.length in 1..5 }?.uppercase()
+        ?: type.substringAfter('/').takeIf { it.length in 1..5 }?.uppercase() ?: "FILE"
+
 /** "2.4 MB", "830 KB". */
 fun sizeLabel(bytes: Long): String = when {
+    bytes >= 1024L * 1024 * 1024 -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1073741824.0)
     bytes >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1048576.0)
     bytes >= 1024 -> "${bytes / 1024} KB"
     else -> "$bytes B"

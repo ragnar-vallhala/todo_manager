@@ -19,7 +19,7 @@ struct Attachment
 {
     std::string id;    // the file's content hash
     std::string name;  // as uploaded, e.g. "screenshot.png"
-    std::string type;  // "image/png", ..., "application/pdf", "video/mp4", "video/webm"
+    std::string type;  // "image/png", ..., "application/pdf", "video/mp4", "video/webm", or any other for documents
     int64_t size{0};   // bytes
     int width{0}, height{0};  // pixels, for images and videos whose header says; else 0
     double duration{0};       // seconds, for videos whose header says; else 0

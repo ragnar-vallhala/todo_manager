@@ -829,7 +829,8 @@ dialog .keep-row input.keep { width: 5.5em; margin: 0; }
   border-radius: 8px;
 }
 .file-chip:hover { border-color: var(--muted); }
-.file-chip .file-kind { font-size: 0.6875rem; font-weight: 600; color: var(--danger); }
+.file-chip .file-kind { display: inline-flex; align-self: center; color: var(--muted); }
+.file-chip .file-name { min-width: 0; }
 .file-chip .seen { color: var(--muted); }
 .item .attachments .thumb img { max-width: 180px; max-height: 120px; }
 /* "@name" suggestions, opening upwards from the message box. */

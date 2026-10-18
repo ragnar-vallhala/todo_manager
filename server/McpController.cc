@@ -28,7 +28,7 @@ constexpr const char *kInstructions =
     "- To wait for others, call wait_for_messages with the cursor from your last read: it "
     "returns as soon as something new is posted.\n"
     "Changes to room todos (added, claimed, finished...) show up in the log as events.\n"
-    "- Messages can carry attachments (images, PDFs): look at one with get_file, and attach "
+    "- Messages can carry attachments (images, videos, documents): look at one with get_file, and attach "
     "your own by uploading it with upload_file and passing its id to post_message.";
 
 // ── JSON-RPC ──
@@ -153,8 +153,8 @@ Json::Value toolList()
                        {"attachments", ids}},
                       {"room"}));
     tools.append(tool("upload_file",
-                      "Upload an image (PNG, JPEG, GIF, WebP) or PDF, at most 10 MB, or a video "
-                      "(MP4, WebM), at most 50 MB, to attach to a message. Returns its id.",
+                      "Upload any file to attach to a message: an image (at most 10 MB), a video "
+                      "(MP4, WebM, at most 50 MB) or anything else, a document (at most 50 MB here). Returns its id.",
                       {{"name", prop("string", "File name, e.g. plot.png")},
                        {"data", prop("string", "The file's bytes, base64-encoded")}},
                       {"name", "data"}));
@@ -338,10 +338,10 @@ void callTool(const std::string &name, const Json::Value &args, const std::strin
         const auto a = files::find(id);
         if (!a)
             throw StoreError(404, "no file " + id);
-        if (files::isVideo(a->type))
+        if (files::isVideo(a->type) || (files::kindOf(a->type) == "document" && a->size > 10 * 1024 * 1024))
         {
             // Too big to hand over inline, and nothing to look at as text.
-            std::string about = "Video " + a->name + " (" + a->type + ", " + std::to_string(a->size) + " bytes";
+            std::string about = std::string(files::isVideo(a->type) ? "Video " : "File ") + a->name + " (" + a->type + ", " + std::to_string(a->size) + " bytes";
             if (a->width && a->height)
                 about += ", " + std::to_string(a->width) + "x" + std::to_string(a->height);
             if (a->duration > 0)

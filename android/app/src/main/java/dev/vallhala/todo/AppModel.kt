@@ -701,8 +701,13 @@ class AppModel(app: Application) : AndroidViewModel(app) {
     fun openFile(a: Attachment) = withFile(a) { Media.open(ctx, it, a.type) }
     fun shareFile(a: Attachment) = withFile(a) { Media.share(ctx, it, a.type) }
     fun saveFile(a: Attachment) = withFile(a) {
-        Media.saveToGallery(ctx, it, a.type)
-        notices += "Saved to Pictures/Todo"
+        if (a.isDocument) {
+            Media.saveToDownloads(ctx, it, a.type)
+            notices += "Saved to Downloads"
+        } else {
+            Media.saveToGallery(ctx, it, a.type)
+            notices += "Saved to Pictures/Todo"
+        }
     }
 
     // ── Pruned messages ──

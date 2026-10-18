@@ -25,7 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forum
-import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material3.DropdownMenu
@@ -242,7 +242,7 @@ fun SharePicker(model: AppModel) {
                         if (d.isMedia) MediaThumb(Pic(d.file, d.width, d.height, d.name, d.isVideo, d.duration), Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)), small = true)
                         else Surface(Modifier.size(72.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                             Column(Modifier.padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                                Icon(Icons.Default.PictureAsPdf, null, tint = Color(0xFFE5483A))
+                                Icon(Icons.Default.Description, null, tint = Color(0xFF5468D8))
                                 Text(sizeLabel(d.size), style = MaterialTheme.typography.labelSmall)
                             }
                         }

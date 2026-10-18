@@ -1299,21 +1299,27 @@ function messageRow(m, tools) {
   return li;
 }
 
-// ── Attachments: images, PDFs and videos on messages and todos ──
+// ── Attachments: images and videos, and any other file as a document, on messages and todos ──
 
-const FILE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'video/mp4', 'video/webm'];
-const MAX_FILE = 10 * 1024 * 1024;   // the server's limit for images and PDFs
-const MAX_VIDEO = 50 * 1024 * 1024;  // and for videos
+const MAX_IMAGE = 10 * 1024 * 1024;  // the server's limit for images
+const MAX_VIDEO = 50 * 1024 * 1024;  // for videos
+const MAX_DOC = 200 * 1024 * 1024;   // and for everything else
 const isVideo = (file) => file.type.startsWith('video/') || /\.(mp4|m4v|webm)$/i.test(file.name || '');
+const isImage = (file) => /^image\/(png|jpeg|gif|webp)$/.test(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name || '');
+const limitOf = (file) => (isVideo(file) ? MAX_VIDEO : isImage(file) ? MAX_IMAGE : MAX_DOC);
 let pendingFiles = [];   // for the message being written: uploaded ones, and { name, uploading: true }
 let pendingRoom = null;  // the room they're for
 
 const fileUrl = (a) => `/api/files/${a.id}?name=${encodeURIComponent(a.name)}`;
+// The server sends anything that isn't an image or video as a download.
+const isDocument = (a) => a.kind ? a.kind === 'document' : !/^(image|video)\//.test(a.type);
+const DOC_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M3.5 1.75h6l3 3v9.5h-9z"/><path d="M9.5 1.75v3h3M5.5 8h5M5.5 10.5h5"/></svg>';
 
 function sizeLabel(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 // Thumbnails for images (click: the full image, in a new tab), a player for
@@ -1328,17 +1334,21 @@ function attachmentList(list) {
       return el('div', { className: 'video' }, video);
     }
     // Not draggable, so dragging a todo by its thumbnail still moves the todo.
-    const link = el('a', { href: fileUrl(a), target: '_blank', rel: 'noopener', draggable: false,
+    const doc = isDocument(a);
+    const link = el('a', { href: doc ? fileUrl(a) + '&download=1' : fileUrl(a), target: '_blank', rel: 'noopener', draggable: false,
       title: `${a.name} · ${a.width ? `${a.width}×${a.height} · ` : ''}${sizeLabel(a.size)}` });
-    if (a.type.startsWith('image/')) {
+    if (doc) {
+      link.className = 'file-chip';
+      link.download = a.name;
+      const icon = el('span', { className: 'file-kind' });
+      icon.innerHTML = DOC_ICON;
+      link.append(icon, el('span', { className: 'file-name', textContent: a.name }),
+        el('span', { className: 'seen', textContent: ' · ' + sizeLabel(a.size) }));
+    } else if (a.type.startsWith('image/')) {
       link.className = 'thumb';
       const img = el('img', { src: fileUrl(a), alt: a.name, loading: 'lazy', decoding: 'async', draggable: false });
       if (a.width && a.height) Object.assign(img, { width: a.width, height: a.height });
       link.append(img);
-    } else {
-      link.className = 'file-chip';
-      link.append(el('span', { className: 'file-kind', textContent: 'PDF' }), a.name,
-        el('span', { className: 'seen', textContent: ' · ' + sizeLabel(a.size) }));
     }
     return link;
   }));
@@ -1350,12 +1360,8 @@ function addFiles(files) {
   if (id == null) return;
   for (const file of files) {
     const name = file.name || 'pasted.png';
-    if (!FILE_TYPES.includes(file.type) && !/\.(png|jpe?g|gif|webp|pdf|mp4|m4v|webm)$/i.test(name)) {
-      showError(new Error(`${name} isn't an image (PNG, JPEG, GIF, WebP), a PDF or a video (MP4, WebM).`));
-      continue;
-    }
-    if (file.size > (isVideo(file) ? MAX_VIDEO : MAX_FILE)) {
-      showError(new Error(`${name} is over ${isVideo(file) ? 50 : 10} MB, the most the server takes.`));
+    if (file.size > limitOf(file)) {
+      showError(new Error(`${name} is over ${limitOf(file) / 1024 / 1024} MB, the most the server takes.`));
       continue;
     }
     const item = { name, uploading: true };

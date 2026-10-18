@@ -55,6 +55,8 @@ data class Attachment(
     /** Shown as a picture: images, and videos by a frame. */
     val isMedia get() = isImage || isVideo
     val isPdf get() = type == "application/pdf"
+    /** Anything that isn't an image or a video. */
+    val isDocument get() = !isMedia
 }
 
 /** An attachment in a room's log, with the message it's on. */

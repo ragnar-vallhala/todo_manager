@@ -32,7 +32,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -178,6 +177,10 @@ private fun FileMenu(model: AppModel, a: Attachment, shown: Boolean, onDismiss: 
             if (Build.VERSION.SDK_INT < 29) askWrite.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE) else model.saveFile(a)
         })
         if (!a.isMedia) DropdownMenuItem({ Text("Open") }, { onDismiss(); model.openFile(a) })
+        if (!a.isMedia) DropdownMenuItem({ Text("Save to Downloads") }, {
+            onDismiss()
+            if (Build.VERSION.SDK_INT < 29) askWrite.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE) else model.saveFile(a)
+        })
     }
 }
 
@@ -185,7 +188,7 @@ private fun FileMenu(model: AppModel, a: Attachment, shown: Boolean, onDismiss: 
 @Composable
 private fun DocsList(model: AppModel, files: List<RoomFile>, done: Boolean) {
     if (files.isEmpty()) {
-        if (done) EmptyState(Icons.Default.Description, "No documents", "PDFs posted in this room show up here.")
+        if (done) EmptyState(Icons.Default.Description, "No documents", "Files posted in this room show up here.")
         return
     }
     val clock = rememberClock()
@@ -201,11 +204,11 @@ private fun DocsList(model: AppModel, files: List<RoomFile>, done: Boolean) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
-                        Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFFE5483A)),
+                        Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF5468D8)),
                         contentAlignment = Alignment.Center,
                     ) {
                         if (model.fetching == a.id) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
-                        else Icon(Icons.Default.PictureAsPdf, null, tint = Color.White)
+                        else Icon(Icons.Default.Description, null, tint = Color.White)
                     }
                     Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
