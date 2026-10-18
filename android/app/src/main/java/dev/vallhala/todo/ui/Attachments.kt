@@ -21,7 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrokenImage
-import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
@@ -168,7 +168,7 @@ fun ImageGrid(
 private fun Modifier.tap(onClick: () -> Unit, onLongClick: (() -> Unit)?) =
     combinedClickable(onClick = onClick, onLongClick = onLongClick)
 
-/** A PDF (or other file) as a card: icon, name, size; a spinner while it's being fetched to open. */
+/** A document as a card: icon, name, size; a spinner while it's being fetched to open. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileCard(
@@ -191,11 +191,11 @@ fun FileCard(
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFFE5483A)),
+                Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF5468D8)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (busy) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
-                else Icon(Icons.Default.PictureAsPdf, null, tint = Color.White)
+                else Icon(Icons.Default.Description, null, tint = Color.White)
             }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f, fill = false)) {

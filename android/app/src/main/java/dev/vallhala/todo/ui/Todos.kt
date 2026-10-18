@@ -60,7 +60,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -663,14 +662,14 @@ private fun Section(label: String) {
     Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
 }
 
-/** A todo's files, as in chat: images as a grid (tap for the viewer), PDFs as cards; add or remove them. */
+/** A todo's files, as in chat: images as a grid (tap for the viewer), other files as cards; add or remove them. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TodoFiles(model: AppModel, t: Todo) {
     val images = t.attachments.filter { it.isMedia }
     val files = t.attachments.filter { !it.isMedia }
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(AppModel.MAX_FILES)) { model.attachToTodo(t, it) }
-    val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { model.attachToTodo(t, it) }
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { model.attachToTodo(t, it) }
     var remove by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -681,10 +680,10 @@ private fun TodoFiles(model: AppModel, t: Todo) {
             IconButton(onClick = { pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }) {
                 Icon(Icons.Default.PhotoLibrary, "Attach photos or videos")
             }
-            IconButton(onClick = { pickPdf.launch(arrayOf("application/pdf")) }) { Icon(Icons.Default.PictureAsPdf, "Attach a PDF") }
+            IconButton(onClick = { pickFile.launch(arrayOf("*/*")) }) { Icon(Icons.Default.AttachFile, "Attach a file") }
         }
         if (t.attachments.isEmpty()) {
-            Text("No files. Attach photos, videos or PDFs to keep them with the todo.", style = MaterialTheme.typography.bodySmall, color = LocalExtra.current.muted)
+            Text("No files. Attach photos, videos or any file to keep them with the todo.", style = MaterialTheme.typography.bodySmall, color = LocalExtra.current.muted)
         }
         if (images.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val gallery = images.map { GalleryItem(it) }
@@ -702,7 +701,7 @@ private fun TodoFiles(model: AppModel, t: Todo) {
         for (a in files) {
             Box {
                 FileCard(
-                    a.name, "PDF · ${sizeLabel(a.size)}",
+                    a.name, "${dev.vallhala.todo.docKind(a.name, a.type)} · ${sizeLabel(a.size)}",
                     busy = model.fetching == a.id,
                     container = MaterialTheme.colorScheme.surfaceContainerHigh,
                     content = MaterialTheme.colorScheme.onSurface,
