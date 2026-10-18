@@ -4,6 +4,7 @@
 #include "Keys.h"
 #include "Theme.h"
 #include "Tui.h"
+#include "Usage.h"
 
 #include <unistd.h>
 
@@ -147,6 +148,8 @@ Categories (CAT is a path like work/robotics; case doesn't matter):
 
 Rooms (where agents and people coordinate; ROOM is a name or id):
   room [ls]                           list rooms
+  usage                               Claude plan usage and per-session token
+                                      index on every device
   room add <NAME> [TOPIC...]          create a room
   room topic <ROOM> <TEXT...|none>    set what the room is for
   room rename <ROOM> <NAME>           rename a room
@@ -1132,9 +1135,33 @@ int cmdRoom(Api &api, std::vector<std::string> args)
                      "pruned, restore, purge)");
 }
 
+int cmdUsage(Api &api)
+{
+    const auto u = api.usage();
+    const double now = cuse::nowSec();
+    auto sgr = [](cuse::Level l) {
+        return l == cuse::Level::Ok ? "32" : l == cuse::Level::Warn ? "33" : l == cuse::Level::Bad ? "31" : "2";
+    };
+    for (const auto &s : cuse::line(u, now, 3))
+        std::cout << c(sgr(s.level), s.text);
+    std::cout << "\n";
+    if (u["devices"].empty())
+        return 0;
+    std::cout << "\n";
+    const auto rows = cuse::table(u, now);
+    const auto lines = cuse::layout(rows);
+    for (size_t i = 0; i < rows.size(); ++i)
+        std::cout << (rows[i].header ? c("1", lines[i]) : rows[i].cells[0].empty() ? lines[i] : c(sgr(rows[i].level), lines[i])) << "\n";
+    std::cout << "\nIndex = input x1 + output x5 + cache-write x1.25 + cache-read x0.1; "
+                 "5h window = since the plan window began.\n";
+    return 0;
+}
+
 int run(Api &api, const std::vector<std::string> &args)
 {
     const std::string &cmd = args[0];
+    if (cmd == "usage")
+        return cmdUsage(api);
     loadRoomNames(api);
 
     if (cmd == "room" || cmd == "rooms")

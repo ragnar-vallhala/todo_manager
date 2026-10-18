@@ -1722,6 +1722,75 @@ const refresh = () => { if (!dialog.open && menu.hidden && !dragging) load(); };
 window.addEventListener('focus', refresh);
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 
+// ── Claude usage (GET /api/usage, every 30 s) ──
+
+let usage = null;
+const usageLevel = (p) => p == null ? '' : p >= 90 ? 'red' : p >= 70 ? 'yellow' : 'green';
+const usagePct = (p) => p == null ? '–' : Math.round(p) + '%';
+function usageReset(at, now) {
+  if (!at) return '';
+  const m = Math.floor((at - now) / 60);
+  if (m <= 0) return 'now';
+  if (m < 60) return m + 'm';
+  if (m < 48 * 60) return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  return Math.floor(m / 1440) + 'd ' + Math.floor(m % 1440 / 60) + 'h';
+}
+const worstOf = (key) => {
+  const v = (usage?.devices || []).map(d => d[key]).filter(x => typeof x === 'number');
+  return v.length ? Math.max(...v) : null;
+};
+
+function renderUsage() {
+  const strip = $('#usage-strip');
+  strip.hidden = !usage?.devices?.length;
+  if (strip.hidden) return;
+  const h5 = worstOf('five_hour_pct'), d7 = worstOf('seven_day_pct');
+  strip.replaceChildren(
+    el('span', { className: 'usage-' + usageLevel(h5), textContent: '5h ' + usagePct(h5) }), ' ',
+    el('span', { className: 'usage-' + usageLevel(d7), textContent: '7d ' + usagePct(d7) }));
+  const dlg = $('#usage-dialog');
+  if (dlg.open) fillUsageDialog(dlg);
+}
+
+function fillUsageDialog(dlg) {
+  const rows = [];
+  for (const d of [...usage.devices].sort((a, b) => a.device.localeCompare(b.device))) {
+    const meter = (label, p, at) => el('tr', {},
+      el('td', { textContent: label }),
+      el('td', { className: 'usage-' + usageLevel(p), textContent: usagePct(p) }),
+      el('td', { className: 'muted', colSpan: 2, textContent: at ? 'resets in ' + usageReset(at, usage.now) : '' }));
+    rows.push(el('tr', { className: 'usage-dev' }, el('th', { colSpan: 4, textContent: d.device })));
+    rows.push(meter('5 hours', d.five_hour_pct, d.five_hour_resets_at));
+    rows.push(meter('7 days', d.seven_day_pct, d.seven_day_resets_at));
+    for (const s of (d.sessions || []).slice(0, 8))
+      rows.push(el('tr', { className: 'usage-sess' },
+        el('td', { colSpan: 2, textContent: s.name || s.project }),
+        el('td', { className: 'num', textContent: Math.round(s.idx_30m || 0) }),
+        el('td', { className: 'num', textContent: Math.round(s.idx_window || 0) })));
+  }
+  const close = el('button', { className: 'quiet', textContent: 'Close', onclick: () => dlg.close() });
+  dlg.replaceChildren(el('h2', { textContent: 'Claude usage' }),
+    el('table', { className: 'usage-table' },
+      el('thead', {}, el('tr', {}, el('th', { colSpan: 2 }), el('th', { className: 'num', textContent: '30 min' }),
+        el('th', { className: 'num', textContent: 'window' }))),
+      el('tbody', {}, ...rows)),
+    close);
+}
+
+async function loadUsage() {
+  try { usage = await api('GET', '/usage'); renderUsage(); } catch {}
+}
+
+$('#usage-strip').addEventListener('click', () => {
+  if (!usage?.devices?.length) return;
+  const dlg = $('#usage-dialog');
+  fillUsageDialog(dlg);
+  dlg.showModal();
+});
+$('#usage-dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+setInterval(() => { if (!document.hidden) loadUsage(); }, 30000);
+loadUsage();
+
 view = readHash();
 load();
 refreshTheme();

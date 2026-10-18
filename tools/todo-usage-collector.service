@@ -1,0 +1,11 @@
+[Unit]
+Description=Report Claude usage to the todo server
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/bin/todo-usage-collector --device %i
+Restart=always
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=default.target

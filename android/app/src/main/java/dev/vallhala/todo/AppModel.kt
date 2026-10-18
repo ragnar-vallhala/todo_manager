@@ -98,6 +98,8 @@ class AppModel(app: Application) : AndroidViewModel(app) {
     val prefs = Prefs(app)
     private var api = Api(prefs.server, prefs.agent)
 
+    suspend fun usage() = api.usage()
+
     var agent by mutableStateOf(prefs.agent); private set
     var server by mutableStateOf(prefs.server); private set
     var needsSetup by mutableStateOf(!prefs.configured); private set
