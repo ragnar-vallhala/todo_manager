@@ -897,3 +897,18 @@ dialog .keep-row input.keep { width: 5.5em; margin: 0; }
     transition: none !important;
   }
 }
+
+/* ── Claude usage ── */
+
+.usage-strip { font-size: 0.75rem; font-variant-numeric: tabular-nums; padding: 2px 6px; }
+.usage-green { color: var(--accent); }
+.usage-yellow { color: var(--warn); }
+.usage-red { color: var(--danger); }
+.usage-dialog { min-width: min(92vw, 28rem); }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; margin: 8px 0 12px; }
+.usage-table th, .usage-table td { text-align: left; padding: 2px 6px; }
+.usage-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.usage-table .muted, .usage-table thead th { color: var(--muted); font-weight: 400; }
+.usage-table .usage-dev th { padding-top: 10px; font-weight: 600; }
+.usage-table .usage-sess td { color: var(--muted); }
+.usage-strip[hidden] { display: none; }

@@ -38,6 +38,7 @@
           <span class="visually-hidden">Categories</span>
         </button>
         <div id="crumbs" class="crumbs"></div>
+        <button id="usage-strip" class="usage-strip quiet" hidden title="Claude usage"></button>
         <span id="open-count" class="count-label"></span>
         <div class="menu-wrap">
           <button id="cat-menu-btn" class="quiet icon" aria-haspopup="menu" aria-expanded="false" hidden>
@@ -112,6 +113,7 @@
   </div>
 
   <dialog id="dialog"></dialog>
+  <dialog id="usage-dialog" class="usage-dialog"></dialog>
 
   <template id="item-tpl">
     <li class="item" draggable="true">
