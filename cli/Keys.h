@@ -274,6 +274,7 @@ inline const std::vector<Action> &actions()
         {"cat_add", "a", "Categories", "add a subcategory (Rooms: a room)"},
         {"cat_open", "enter", "Categories", "show its todos"},
         {"cat_fold", "space", "Categories", "fold / unfold"},
+        {"cat_fold_all", "z", "Categories", "fold all / unfold all (categories and rooms)"},
         {"cat_rename", "e", "Categories", "rename (a category or room)"},
         {"cat_move", "m", "Categories", "move into another category"},
         {"cat_delete", "d x del", "Categories", "delete (a category or room)"},

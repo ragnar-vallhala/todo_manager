@@ -1305,6 +1305,27 @@ class App
         }
     }
 
+    // Fold every category and room if any is open, otherwise unfold all.
+    void toggleFoldAll()
+    {
+        bool anyOpen = false;
+        for (const auto &r : catRows())
+            if (r.hasChildren && !collapsed_.count(r.id))
+                anyOpen = true;
+        if (!anyOpen)
+        {
+            collapsed_.clear();
+            return;
+        }
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            for (const auto &r : catRows())
+                if (r.hasChildren && collapsed_.insert(r.id).second)
+                    changed = true;
+        }
+    }
+
     std::vector<const TodoItem *> visible() const
     {
         std::vector<const TodoItem *> v;
@@ -1807,6 +1828,8 @@ class App
                     collapsed_.insert(catSelId_);
             }
         }
+        else if (on("cat_fold_all"))
+            toggleFoldAll();
         else if (on("cat_add"))
         {
             inputParent_ = target();
@@ -3358,6 +3381,7 @@ class App
                       {key("cat_archive"), "archive"},
                       {key("cat_style"), "style"},
                       {key("cat_fold"), "fold"},
+                      {key("cat_fold_all"), "fold all"},
                       {pair("resize_left", "resize_right"), "resize"},
                       {key("new_todo"), "new todo"},
                       {key("help"), "help"},
