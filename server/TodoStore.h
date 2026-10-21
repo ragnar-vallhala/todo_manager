@@ -121,6 +121,12 @@ struct Room
     // Goes up whenever messages leave or rejoin the log (prune, restore),
     // so clients holding a copy know to load it again.
     int64_t logVersion{0};
+    // Archived rooms are hidden from lists and refuse new messages; nothing in
+    // them is deleted.
+    bool archived{false};
+    // Seqs of the messages archiving moved to the pruned store (freeing their
+    // ids); unarchiving puts exactly these back. Saved, not in the API.
+    std::vector<int64_t> archivedSeqs;
 
     Json::Value toJson() const;
 };
@@ -214,13 +220,15 @@ class TodoStore
     void removeCategory(int64_t id);
 
     // ── Rooms ──
-    std::vector<Room> listRooms() const;
+    // Without `includeArchived`, archived rooms are left out.
+    std::vector<Room> listRooms(bool includeArchived = true) const;
     Room room(int64_t id) const;  // 404 if missing
     // Finds a room by id ("3", "#3") or name (case-insensitive); 404 if none.
     Room findRoom(const std::string &ref) const;
     Room addRoom(const std::string &name, const std::string &topic);
     Room updateRoom(int64_t id, const std::optional<std::string> &name,
-                    const std::optional<std::string> &topic);
+                    const std::optional<std::string> &topic,
+                    std::optional<bool> archived = std::nullopt);
     // Deletes the room and its messages; its todos stay, outside any room.
     void removeRoom(int64_t id);
     // Drops `name` from the room's members (they rejoin if they show up again).

@@ -10,11 +10,11 @@
 using http::error;
 using http::json;
 
-// GET /api/rooms
-void RoomController::list(const HttpRequestPtr &, Callback &&cb)
+// GET /api/rooms[?archived=1]  -- archived rooms only with archived=1
+void RoomController::list(const HttpRequestPtr &req, Callback &&cb)
 {
     Json::Value arr(Json::arrayValue);
-    for (const auto &r : TodoStore::get().listRooms())
+    for (const auto &r : TodoStore::get().listRooms(http::wantsArchived(req)))
         arr.append(rooms::roomJson(r));
     cb(json(arr));
 }
@@ -57,13 +57,20 @@ void RoomController::show(const HttpRequestPtr &, Callback &&cb, int64_t id)
     }
 }
 
-// PATCH /api/rooms/{id}  {"name"?: "...", "topic"?: "..."|null}
+// PATCH /api/rooms/{id}  {"name"?: "...", "topic"?: "..."|null, "archived"?: bool}
 void RoomController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id)
 {
     auto body = req->getJsonObject();
     if (!body || !body->isObject())
         return cb(error(400, "body must be a JSON object"));
     std::optional<std::string> name, topic;
+    std::optional<bool> archived;
+    if (body->isMember("archived"))
+    {
+        if (!(*body)["archived"].isBool())
+            return cb(error(400, "archived must be a boolean"));
+        archived = (*body)["archived"].asBool();
+    }
     if (body->isMember("name"))
     {
         if (!(*body)["name"].isString())
@@ -81,11 +88,11 @@ void RoomController::update(const HttpRequestPtr &req, Callback &&cb, int64_t id
         if (topic->size() > rooms::kMaxTopic)
             return cb(error(400, "topic must be at most 500 characters"));
     }
-    if (!name && !topic)
+    if (!name && !topic && !archived)
         return cb(error(400, "nothing to update"));
     try
     {
-        cb(json(rooms::roomJson(TodoStore::get().updateRoom(id, name, topic))));
+        cb(json(rooms::roomJson(TodoStore::get().updateRoom(id, name, topic, archived))));
     }
     catch (const StoreError &e)
     {

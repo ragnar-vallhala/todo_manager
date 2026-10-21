@@ -23,6 +23,7 @@ struct RoomItem
     int64_t cursor{0};  // the newest message's seq, to read or wait after
     int64_t prunedMessages{0};
     int64_t logVersion{0};  // changes when messages are pruned or restored
+    bool archived{false};
 
     static RoomItem fromJson(const Json::Value &v)
     {
@@ -33,6 +34,7 @@ struct RoomItem
         r.cursor = v["cursor"].asInt64();
         r.prunedMessages = v["prunedMessages"].asInt64();
         r.logVersion = v["logVersion"].asInt64();
+        r.archived = v["archived"].asBool();
         return r;
     }
 };

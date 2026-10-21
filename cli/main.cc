@@ -147,7 +147,13 @@ Categories (CAT is a path like work/robotics; case doesn't matter):
                                       green, teal, blue, purple, pink, brown, gray
 
 Rooms (where agents and people coordinate; ROOM is a name or id):
-  room [ls]                           list rooms
+  room [ls] [-a]                      list rooms (-a: and archived ones)
+  room archive <ROOM>                 hide a room from lists and refuse new
+                                      messages; its log moves to the pruned
+                                      messages (freeing their ids), todos,
+                                      files and members stay
+  room unarchive <ROOM>               bring it back, messages restored (new
+                                      ids if the old ones were reused)
   usage                               Claude plan usage and per-session token
                                       index on every device
   room add <NAME> [TOPIC...]          create a room
@@ -349,7 +355,7 @@ void loadRoomNames(Api &api)
 {
     try
     {
-        for (const auto &r : api.rooms())
+        for (const auto &r : api.rooms(true))
             gRoomNames[r.id] = r.name;
     }
     catch (const ApiError &e)
@@ -364,7 +370,7 @@ RoomItem resolveRoom(Api &api, const std::string &ref)
 {
     const std::string digits = !ref.empty() && ref[0] == '#' ? ref.substr(1) : ref;
     const bool isId = !digits.empty() && digits.find_first_not_of("0123456789") == std::string::npos;
-    for (const auto &r : api.rooms())
+    for (const auto &r : api.rooms(true))
         if (isId ? std::to_string(r.id) == digits : CategoryTree::lower(r.name) == CategoryTree::lower(ref))
             return r;
     throw UsageError("no room \"" + ref + "\" (see `todo room`)");
@@ -821,7 +827,8 @@ int cmdRoom(Api &api, std::vector<std::string> args)
 
     if (sub == "ls" || sub == "list")
     {
-        auto list = api.rooms();
+        const bool all = args.size() > 2 && (args[2] == "-a" || args[2] == "--archived");
+        auto list = api.rooms(all);
         if (list.empty())
         {
             std::cout << c("2", "No rooms yet. Create one with: todo room add <name> [topic]") << "\n";
@@ -847,8 +854,28 @@ int cmdRoom(Api &api, std::vector<std::string> args)
             }
             if (r.prunedMessages)
                 meta += " · " + std::to_string(r.prunedMessages) + " pruned";
+            if (r.archived)
+                meta += " · [archived]";
             std::cout << c("2", meta) << "\n";
         }
+        return 0;
+    }
+
+    if (sub == "archive" || sub == "unarchive")
+    {
+        need(3, "archive|unarchive <ROOM>");
+        const bool on = sub == "archive";
+        const auto room = resolveRoom(api, args[2]);
+        if (room.archived == on)
+        {
+            std::cout << room.name << " is " << (on ? "already" : "not") << " archived\n";
+            return 0;
+        }
+        const auto r = api.setRoomArchived(room.id, on);
+        std::cout << (on ? "Archived " : "Unarchived ") << c("1;36", r.name) << c("2", on
+                          ? "; messages moved to its pruned list (todo room pruned " + r.name + ")"
+                          : "; messages restored")
+                  << "\n";
         return 0;
     }
 

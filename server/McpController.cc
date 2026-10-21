@@ -262,7 +262,7 @@ void callTool(const std::string &name, const Json::Value &args, const std::strin
     {
         Json::Value arr(Json::arrayValue);
         const auto todos = store.list(true);
-        for (const auto &r : store.listRooms())
+        for (const auto &r : store.listRooms(false))
         {
             auto v = rooms::roomJson(r);
             int open = 0;

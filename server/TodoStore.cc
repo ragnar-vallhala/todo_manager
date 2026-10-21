@@ -192,6 +192,7 @@ Json::Value Room::toJson() const
         v["members"].append(m);
     }
     v["logVersion"] = static_cast<Json::Int64>(logVersion);
+    v["archived"] = archived;
     return v;
 }
 
@@ -352,6 +353,9 @@ void TodoStore::load()
         for (const auto &m : v["members"])
             r.members[m["name"].asString()] = m["lastSeen"].asInt64();
         r.logVersion = v["logVersion"].asInt64();
+        r.archived = v["archived"].asBool();  // missing in old files: false
+        for (const auto &s : v["archivedSeqs"])
+            r.archivedSeqs.push_back(s.asInt64());
         nextRoomId_ = std::max(nextRoomId_, r.id + 1);
         rooms_.push_back(std::move(r));
     }
@@ -385,7 +389,16 @@ void TodoStore::save() const
     root["messages"] = Json::Value(Json::arrayValue);
     root["prunedMessages"] = Json::Value(Json::arrayValue);
     for (const auto &r : rooms_)
-        root["rooms"].append(r.toJson());
+    {
+        Json::Value rv = r.toJson();
+        if (!r.archivedSeqs.empty())
+        {
+            rv["archivedSeqs"] = Json::Value(Json::arrayValue);
+            for (auto s : r.archivedSeqs)
+                rv["archivedSeqs"].append(static_cast<Json::Int64>(s));
+        }
+        root["rooms"].append(rv);
+    }
     for (const auto &m : messages_)
         root["messages"].append(m.toJson());
     for (const auto &m : prunedMessages_)
@@ -827,10 +840,16 @@ void TodoStore::setMessageListener(std::function<void(int64_t)> fn)
     listener_ = std::move(fn);
 }
 
-std::vector<Room> TodoStore::listRooms() const
+std::vector<Room> TodoStore::listRooms(bool includeArchived) const
 {
     std::lock_guard<std::mutex> lock(mu_);
-    return rooms_;
+    if (includeArchived)
+        return rooms_;
+    std::vector<Room> out;
+    for (const auto &r : rooms_)
+        if (!r.archived)
+            out.push_back(r);
+    return out;
 }
 
 Room TodoStore::room(int64_t id) const
@@ -866,7 +885,8 @@ Room TodoStore::addRoom(const std::string &name, const std::string &topic)
 }
 
 Room TodoStore::updateRoom(int64_t id, const std::optional<std::string> &name,
-                           const std::optional<std::string> &topic)
+                           const std::optional<std::string> &topic,
+                           std::optional<bool> archived)
 {
     std::lock_guard<std::mutex> lock(mu_);
     Room *r = findRoomById(id);
@@ -879,6 +899,47 @@ Room TodoStore::updateRoom(int64_t id, const std::optional<std::string> &name,
     }
     if (topic)
         r->topic = *topic;
+    if (archived && *archived != r->archived)
+    {
+        const int64_t rid = r->id;
+        if (*archived)
+        {
+            // Move the whole log to the pruned store, which frees the ids.
+            const auto inRoom = [rid](const Message &m) { return m.roomId == rid; };
+            r->archivedSeqs.clear();
+            for (const auto &m : messages_)
+                if (inRoom(m))
+                    r->archivedSeqs.push_back(m.seq);
+            const int64_t now = nowSeconds();
+            while (true)
+            {
+                auto it = std::find_if(messages_.begin(), messages_.end(), inRoom);
+                if (it == messages_.end())
+                    break;
+                pruneAt(it, now);
+            }
+        }
+        else
+        {
+            // Put back what archiving moved, in time order, with free ids.
+            const auto seqs = r->archivedSeqs;
+            for (auto seq : seqs)
+            {
+                auto it = std::find_if(prunedMessages_.begin(), prunedMessages_.end(),
+                                       [&](const Message &m) { return m.roomId == rid && m.seq == seq; });
+                if (it == prunedMessages_.end())
+                    continue;  // purged meanwhile
+                Message m = *it;
+                prunedMessages_.erase(it);
+                m.id = freeMessageId(messages_, rid);
+                m.prunedAt = 0;
+                insertBySeq(messages_, m);
+            }
+            r->archivedSeqs.clear();
+            ++r->logVersion;
+        }
+        r->archived = *archived;
+    }
     save();
     return *r;
 }
@@ -919,6 +980,8 @@ Message TodoStore::post(int64_t roomId, const std::string &author, const std::st
 {
     std::lock_guard<std::mutex> lock(mu_);
     checkRoomExists(roomId);
+    if (findRoomById(roomId)->archived)
+        throw StoreError(409, "room is archived, unarchive first");
     Message m = append(roomId, author, text, "message", 0, attachments);
     save();
     return m;

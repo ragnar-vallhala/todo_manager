@@ -134,6 +134,16 @@ as p1, p2, ... and can be restored) and frees their ids, and a new message takes
 the lowest id free in its room, so ids stay small. The log is in the order
 messages were posted, whatever their ids.
 
+Rooms can be archived (`todo room archive ROOM`, or Archive in a room's menu):
+the room disappears from `todo room` and the sidebar (`todo room ls -a` and the
+sidebar's collapsed **Archived rooms** section show it), and posting to it is
+refused with "room is archived, unarchive first". Nothing is deleted: its
+todos, files and members stay, and its messages move to the pruned list (so
+`room pruned ROOM` still reads them) which frees their ids. `todo room
+unarchive ROOM` puts exactly those messages back in time order, with free ids
+(new ones if the old were reused). Messages you pruned yourself before stay
+pruned.
+
 ### Attachments
 
 Messages (and todos) can carry files: images (PNG, JPEG, GIF, WebP) and PDFs
@@ -164,6 +174,8 @@ From the CLI, you are `--as NAME`, else `$TODO_AGENT`, else `$USER`:
 ```sh
 todo room                            # rooms: topic, open todos, members
 todo room add rover Rover firmware   # name, then topic
+todo room ls -a                      # also archived rooms, marked [archived]
+todo room archive rover              # hide it, free its message ids; `unarchive` restores
 todo room show rover                 # topic, members, todos, last 20 messages
 todo room forget rover claude-old    # remove members so @ stops suggesting them
 todo room say rover Starting on the motor driver   # `-` reads stdin
@@ -390,10 +402,10 @@ ssh other-host 'mkdir -p ~/.config/todo && echo http://navrobotec:27183 > ~/.con
 | GET    | `/api/themes`            | –                                           | `[{"name", "colors": {role: "#rrggbb"}}]` |
 | POST   | `/api/todos/{id}/claim`  | `{"agent"?, "force"?}`                      | → the todo; 409 if someone else has it |
 | POST   | `/api/todos/{id}/release`| `{"agent"?, "force"?}`                      | → the todo; 409 if it's someone else's |
-| GET    | `/api/rooms`             | –                                           | rooms with `members`, `cursor`, `prunedMessages`, `logVersion` |
+| GET    | `/api/rooms`             | –                                           | rooms with `members`, `cursor`, `prunedMessages`, `logVersion`, `archived`; `?archived=1` includes archived rooms |
 | POST   | `/api/rooms`             | `{"name", "topic"?}`                        | 201; 409 if name taken       |
 | GET    | `/api/rooms/{id}`        | –                                           | one room                     |
-| PATCH  | `/api/rooms/{id}`        | `{"name"?, "topic"?}`                       | → the room                   |
+| PATCH  | `/api/rooms/{id}`        | `{"name"?, "topic"?, "archived"?}`        | → the room; archiving moves its log to the pruned messages, unarchiving restores it; posting to an archived room is 409 |
 | DELETE | `/api/rooms/{id}`        | –                                           | 204; deletes its messages, its todos stay |
 | DELETE | `/api/rooms/{id}/members` | –                                          | `?name=NAME` → the room, without them |
 | GET    | `/api/rooms/{id}/messages` | –                                         | `?since=SEQ&limit=N&wait=SECONDS` (long-poll, max 300); `&before=SEQ` pages back (no wait) |

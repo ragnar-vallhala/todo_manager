@@ -221,10 +221,11 @@ class Api
     // Claude usage reports from all devices (see Usage.h).
     Json::Value usage() { return send(drogon::Get, "/api/usage"); }
 
-    std::vector<RoomItem> rooms()
+    // With `archived`, archived rooms are included.
+    std::vector<RoomItem> rooms(bool archived = false)
     {
         std::vector<RoomItem> out;
-        for (const auto &v : send(drogon::Get, "/api/rooms"))
+        for (const auto &v : send(drogon::Get, archived ? "/api/rooms?archived=1" : "/api/rooms"))
             out.push_back(RoomItem::fromJson(v));
         return out;
     }
@@ -247,6 +248,15 @@ class Api
             body["name"] = *name;
         if (topic)
             body["topic"] = topic->empty() ? Json::Value() : Json::Value(*topic);
+        return RoomItem::fromJson(send(drogon::Patch, roomPath(id), &body));
+    }
+
+    // Archiving moves the log to the pruned messages (freeing their ids);
+    // unarchiving puts them back.
+    RoomItem setRoomArchived(int64_t id, bool archived)
+    {
+        Json::Value body;
+        body["archived"] = archived;
         return RoomItem::fromJson(send(drogon::Patch, roomPath(id), &body));
     }
 
