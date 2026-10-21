@@ -7,6 +7,7 @@ const el = (tag, props = {}, ...children) => {
 const tpl = $('#item-tpl');
 const ALL = 'all';
 const INBOX = 'inbox';
+const ROOM_ARCHIVE = 'rooms-archive';  // the sidebar's Archived rooms section
 const ARCHIVE = 'archive';  // every archived category
 const PRUNED = 'pruned';    // done todos moved aside to free their ids
 const ROOM = 'room:';       // a room's view is ROOM + its id, e.g. 'room:3'
@@ -20,6 +21,7 @@ let view = ALL;           // ALL, INBOX, ARCHIVE, PRUNED, a category id or ROOM 
 let seen = null;          // ids already on screen, so only new rows animate in
 let showDone = false;
 let showArchive = false;  // the sidebar's Archived section is unfolded
+let showRoomArchive = false;  // the Archived rooms section is unfolded
 let collapsed = new Set();
 let me = 'human';         // your name in rooms
 let lastRead = {};        // room id -> the newest message seq you've seen there
@@ -27,6 +29,7 @@ let lastRead = {};        // room id -> the newest message seq you've seen there
 try {
   showDone = localStorage.getItem('showDone') === '1';
   showArchive = localStorage.getItem('showArchive') === '1';
+  showRoomArchive = localStorage.getItem('showRoomArchive') === '1';
   collapsed = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'));
   me = localStorage.getItem('agentName') || 'human';
   lastRead = JSON.parse(localStorage.getItem('roomRead') || '{}');
@@ -36,6 +39,7 @@ function remember() {
   try {
     localStorage.setItem('showDone', showDone ? '1' : '0');
     localStorage.setItem('showArchive', showArchive ? '1' : '0');
+    localStorage.setItem('showRoomArchive', showRoomArchive ? '1' : '0');
     localStorage.setItem('collapsed', JSON.stringify([...collapsed]));
     localStorage.setItem('agentName', me);
     localStorage.setItem('roomRead', JSON.stringify(lastRead));
@@ -93,7 +97,7 @@ async function fetchAll() {
   const first = !cats.length;
   [todos, cats, pruned, rooms] = await Promise.all([
     api('GET', '/todos?archived=1'), api('GET', '/categories?archived=1'), api('GET', '/pruned'),
-    api('GET', '/rooms')]);
+    api('GET', '/rooms?archived=1')]);
   roomsLoaded = true;
   if (first) revealArchive();  // opened on an archived category's link
 }
@@ -271,6 +275,10 @@ function revealArchive() {
     showArchive = true;
     remember();
   }
+  if (findRoom(roomIdOf())?.archived && !showRoomArchive) {
+    showRoomArchive = true;
+    remember();
+  }
 }
 
 window.addEventListener('popstate', () => { view = readHash(); revealArchive(); render(); });
@@ -292,9 +300,10 @@ function render() {
 }
 
 // `fold` is a category id, or ARCHIVE for the Archived section.
-const isFolded = (fold) => (fold === ARCHIVE ? !showArchive : collapsed.has(fold));
+const isFolded = (fold) => (fold === ARCHIVE ? !showArchive : fold === ROOM_ARCHIVE ? !showRoomArchive : collapsed.has(fold));
 function toggleFold(fold) {
   if (fold === ARCHIVE) showArchive = !showArchive;
+  else if (fold === ROOM_ARCHIVE) showRoomArchive = !showRoomArchive;
   else collapsed.has(fold) ? collapsed.delete(fold) : collapsed.add(fold);
   remember();
   render();
@@ -303,7 +312,7 @@ function toggleFold(fold) {
 function navRow(v, name, { depth = 0, fold = null } = {}) {
   const row = el('div', { className: 'nav-row' });
   row.style.paddingLeft = `${depth * 14}px`;
-  if (typeof v === 'number' && inArchive(v)) row.classList.add('archived');
+  if ((typeof v === 'number' && inArchive(v)) || findRoom(roomIdOf(v))?.archived) row.classList.add('archived');
 
   if (fold) {
     const expanded = !isFolded(fold);
@@ -316,7 +325,7 @@ function navRow(v, name, { depth = 0, fold = null } = {}) {
     row.append(el('span', { className: 'fold-spacer' }));
   }
 
-  const n = v === PRUNED ? pruned.length : openIn(v);
+  const n = v === PRUNED ? pruned.length : v === ROOM_ARCHIVE ? 0 : openIn(v);
   const item = el('button', { className: 'nav-item' },
     el('span', { className: 'nav-name', textContent: name }),
     el('span', { className: 'nav-count', textContent: n || '' }));
@@ -327,7 +336,7 @@ function navRow(v, name, { depth = 0, fold = null } = {}) {
   }
   if (v === view) item.setAttribute('aria-current', 'page');
   if (typeof v === 'number') paintCat(item, v, true);
-  item.addEventListener('click', () => go(v));
+  item.addEventListener('click', () => (v === ROOM_ARCHIVE ? toggleFold(v) : go(v)));
   row.append(item);
 
   // Drop todos (and categories) onto a row to move them there.
@@ -375,8 +384,13 @@ function renderSidebar() {
   if (pruned.length || view === PRUNED) rows.push(navRow(PRUNED, 'Pruned'));
   $('#nav-archive').replaceChildren(...rows);
 
-  const roomRows = rooms.slice().sort(byName).map((r) => navRow(ROOM + r.id, r.name));
+  const roomRows = rooms.filter((r) => !r.archived).sort(byName).map((r) => navRow(ROOM + r.id, r.name));
   if (roomRows.length) roomRows.unshift(el('li', { className: 'nav-heading', textContent: 'Rooms' }));
+  const oldRooms = rooms.filter((r) => r.archived).sort(byName);
+  if (oldRooms.length) {
+    roomRows.push(navRow(ROOM_ARCHIVE, 'Archived rooms', { fold: ROOM_ARCHIVE }));
+    if (showRoomArchive) roomRows.push(...oldRooms.map((r) => navRow(ROOM + r.id, r.name, { depth: 1 })));
+  }
   $('#nav-rooms').replaceChildren(...roomRows);
 }
 
@@ -424,6 +438,8 @@ function renderHeader() {
   // Only the archived category itself can be unarchived, not one inside it.
   const archiveItem = $('[data-action="archive"]', menu);
   archiveItem.textContent = cat?.archived ? 'Unarchive' : 'Archive';
+  const roomArchive = $('[data-action="room-archive"]', menu);
+  roomArchive.textContent = room?.archived ? 'Unarchive' : 'Archive';
   if (!isRoom()) archiveItem.hidden = !cat || (!cat.archived && inArchive(cat.id));
 }
 
@@ -667,7 +683,8 @@ let dragging = null;  // { kind: 'todo' | 'cat', id }
 
 function canDrop(v) {
   if (v === PRUNED) return false;
-  if (isRoom(v)) return dragging.kind === 'todo';  // shares it in the room
+  if (v === ROOM_ARCHIVE) return false;
+  if (isRoom(v)) return dragging.kind === 'todo' && !findRoom(roomIdOf(v))?.archived;  // shares it in the room
   // Dropping a category on Archived archives it.
   if (v === ARCHIVE) return dragging.kind === 'cat' && !inArchive(dragging.id);
   if (dragging.kind === 'todo') return v !== ALL;
@@ -1158,6 +1175,13 @@ async function roomAction(action) {
       await fetchAll();
     });
   }
+  if (action === 'room-archive') {
+    return run(async () => {
+      await api('PATCH', `/rooms/${room.id}`, { archived: !room.archived });
+      await fetchAll();
+      revealArchive();
+    });
+  }
   if (action === 'room-prune') {
     const keep = await promptPrune(room);
     if (keep === undefined) return;
@@ -1398,7 +1422,7 @@ function renderLog() {
   toggle.hidden = !showPruned && !n;
   toggle.textContent = showPruned ? 'Back to messages' : `${n} pruned`;
   $('.log-title').textContent = showPruned ? 'Pruned messages' : 'Messages';
-  $('#room-post').hidden = showPruned;
+  $('#room-post').hidden = showPruned || room?.archived;
   $('#log-pruned-bar').hidden = !showPruned || !prunedLog.messages.length;
   box.classList.toggle('pruned', !!showPruned);
 
